@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/PatchMon/PatchMon/server-source-code/internal/agentregistry"
 	hostctx "github.com/PatchMon/PatchMon/server-source-code/internal/context"
@@ -610,6 +611,82 @@ func (h *HostsHandler) RefreshDocker(w http.ResponseWriter, r *http.Request) {
 			"friendlyName": host.FriendlyName,
 			"apiId":        host.ApiID,
 		},
+	})
+}
+
+// BulkUpdateAutoUpdate handles PATCH /hosts/bulk/auto-update.
+// Body: { hostIds: [...], auto_update: bool }
+func (h *HostsHandler) BulkUpdateAutoUpdate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		HostIds    []string `json:"hostIds"`
+		AutoUpdate bool     `json:"auto_update"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		Error(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if len(req.HostIds) == 0 {
+		Error(w, http.StatusBadRequest, "At least one host ID is required")
+		return
+	}
+	n, err := h.hosts.UpdateAutoUpdateMany(r.Context(), req.HostIds, req.AutoUpdate)
+	if err != nil {
+		Error(w, http.StatusInternalServerError, "Failed to update auto-update setting")
+		return
+	}
+	JSON(w, http.StatusOK, map[string]interface{}{
+		"message":      "Auto-update " + map[bool]string{true: "enabled", false: "disabled"}[req.AutoUpdate] + " for " + strconv.FormatInt(n, 10) + " host(s)",
+		"updatedCount": n,
+		"autoUpdate":   req.AutoUpdate,
+	})
+}
+
+// BulkForceAgentUpdate handles POST /hosts/bulk/force-agent-update.
+// Body: { hostIds: [...] }
+// Enqueues one update_agent task per host, bypassing the auto-update flag.
+// Hosts that are not connected are skipped at the queue level (the existing
+// per-host force-update handler already handles that path).
+func (h *HostsHandler) BulkForceAgentUpdate(w http.ResponseWriter, r *http.Request) {
+	if h.queueClient == nil {
+		Error(w, http.StatusServiceUnavailable, "Queue service unavailable")
+		return
+	}
+	var req struct {
+		HostIds []string `json:"hostIds"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		Error(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if len(req.HostIds) == 0 {
+		Error(w, http.StatusBadRequest, "At least one host ID is required")
+		return
+	}
+
+	hostHeader := hostFromRequest(r)
+	queued := 0
+	failures := []map[string]string{}
+	for _, id := range req.HostIds {
+		host, err := h.hosts.GetByID(r.Context(), id)
+		if err != nil || host == nil {
+			failures = append(failures, map[string]string{"hostId": id, "reason": "not_found"})
+			continue
+		}
+		task, err := queue.NewUpdateAgentTask(host.ApiID, hostHeader, true) // bypass_settings=true
+		if err != nil {
+			failures = append(failures, map[string]string{"hostId": id, "reason": "task_create_failed"})
+			continue
+		}
+		if _, err := h.queueClient.Enqueue(task); err != nil {
+			failures = append(failures, map[string]string{"hostId": id, "reason": "enqueue_failed"})
+			continue
+		}
+		queued++
+	}
+	JSON(w, http.StatusOK, map[string]interface{}{
+		"message":  "Agent update queued for " + strconv.Itoa(queued) + " of " + strconv.Itoa(len(req.HostIds)) + " host(s)",
+		"queued":   queued,
+		"failures": failures,
 	})
 }
 

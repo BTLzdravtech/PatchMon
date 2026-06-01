@@ -440,6 +440,7 @@ type Querier interface {
 	UpdateHostPing(ctx context.Context, id string) error
 	UpdateHostPrimaryInterface(ctx context.Context, arg UpdateHostPrimaryInterfaceParams) error
 	UpdateHostRebootStatus(ctx context.Context, arg UpdateHostRebootStatusParams) error
+	UpdateHostsAutoUpdateMany(ctx context.Context, arg UpdateHostsAutoUpdateManyParams) (int64, error)
 	UpdateJobHistoryCompleted(ctx context.Context, jobID string) error
 	UpdateJobHistoryDelayed(ctx context.Context, jobID string) error
 	UpdateJobHistoryFailed(ctx context.Context, arg UpdateJobHistoryFailedParams) error
