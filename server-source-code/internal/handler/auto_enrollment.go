@@ -433,6 +433,9 @@ func (h *AutoEnrollmentHandler) Enroll(w http.ResponseWriter, r *http.Request) {
 		FriendlyName string          `json:"friendly_name"`
 		MachineID    string          `json:"machine_id"`
 		Metadata     json.RawMessage `json:"metadata"`
+		// AutoUpdate sets the per-host agent auto-update flag. Omit to inherit
+		// the global agent auto-update setting.
+		AutoUpdate *bool `json:"auto_update"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		Error(w, http.StatusBadRequest, "Invalid request body")
@@ -496,6 +499,7 @@ func (h *AutoEnrollmentHandler) Enroll(w http.ResponseWriter, r *http.Request) {
 		ApiID:                  apiID,
 		ApiKey:                 string(apiKeyHash),
 		DockerEnabled:          false,
+		AutoUpdate:             newHostAutoUpdate(ctx, h.settings, req.AutoUpdate),
 		ComplianceEnabled:      complianceEnabled,
 		ComplianceOnDemandOnly: complianceOnDemandOnly,
 	}

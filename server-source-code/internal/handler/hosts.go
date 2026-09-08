@@ -157,6 +157,9 @@ func (h *HostsHandler) Create(w http.ResponseWriter, r *http.Request) {
 		DockerEnabled     *bool    `json:"docker_enabled"`
 		ComplianceEnabled *bool    `json:"compliance_enabled"`
 		ExpectedPlatform  *string  `json:"expected_platform"`
+		// AutoUpdate sets the per-host agent auto-update flag. Omit to inherit
+		// the global agent auto-update setting.
+		AutoUpdate *bool `json:"auto_update"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		Error(w, http.StatusBadRequest, "Invalid request body")
@@ -203,6 +206,7 @@ func (h *HostsHandler) Create(w http.ResponseWriter, r *http.Request) {
 		ApiID:                  apiID,
 		ApiKey:                 apiKeyHash,
 		DockerEnabled:          req.DockerEnabled != nil && *req.DockerEnabled,
+		AutoUpdate:             newHostAutoUpdate(r.Context(), h.settings, req.AutoUpdate),
 		ComplianceEnabled:      complianceEnabled,
 		ComplianceOnDemandOnly: complianceOnDemandOnly,
 		ExpectedPlatform:       req.ExpectedPlatform,

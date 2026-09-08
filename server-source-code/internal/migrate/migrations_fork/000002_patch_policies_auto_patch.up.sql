@@ -1,4 +1,4 @@
--- fork 000003: automated patching schedule on patch_policies.
+-- fork 000002: automated patching schedule on patch_policies.
 --
 -- A policy with auto_patch_enabled=true fires patch_all runs for every host
 -- it resolves to (direct assignment + group membership minus exclusions, with
@@ -11,7 +11,7 @@
 --                           the dispatcher to fire at most once per scheduled
 --                           slot even though it polls every minute.
 --
--- auto_reboot (added in fork 000002) is consumed by automatic runs only: after a
+-- auto_reboot (added in fork 000001) is consumed by automatic runs only: after a
 -- successful scheduled patch the agent reboots iff the host reports a pending
 -- reboot. Manual wizard runs are unaffected.
 
