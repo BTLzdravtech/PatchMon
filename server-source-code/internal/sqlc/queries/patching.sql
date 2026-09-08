@@ -301,6 +301,46 @@ WHERE id = $1;
 -- name: DeletePatchPolicy :exec
 DELETE FROM patch_policies WHERE id = $1;
 
+-- name: UpdatePatchPolicyAutoPatch :exec
+UPDATE patch_policies
+SET auto_patch_enabled = sqlc.arg('auto_patch_enabled'),
+    auto_patch_days = sqlc.narg('auto_patch_days'),
+    auto_patch_time = sqlc.narg('auto_patch_time'),
+    auto_reboot = sqlc.arg('auto_reboot'),
+    updated_at = NOW()
+WHERE id = sqlc.arg('id');
+
+-- name: ListAutoPatchPolicies :many
+SELECT * FROM patch_policies WHERE auto_patch_enabled = true ORDER BY name ASC;
+
+-- name: ClaimPatchPolicyAutoPatchSlot :execrows
+-- Atomically claims one automated-patching slot. Returns 1 row when this
+-- caller won the slot and 0 when another dispatcher already stamped it (or a
+-- later one), so concurrent scheduler ticks or replicas cannot double-fire.
+-- The slot instant itself is stored (not NOW()) so the app-side comparison in
+-- autoPatchDueSlot is not affected by DB/app clock skew.
+UPDATE patch_policies
+SET auto_patch_last_run_at = sqlc.arg('slot')
+WHERE id = sqlc.arg('id')
+  AND (auto_patch_last_run_at IS NULL OR auto_patch_last_run_at < sqlc.arg('slot'));
+
+-- name: ListPatchPolicyTargetHostIDs :many
+SELECT ppa1.target_id AS host_id FROM patch_policy_assignments ppa1
+WHERE ppa1.patch_policy_id = $1 AND ppa1.target_type = 'host'
+UNION
+SELECT hgm.host_id AS host_id FROM host_group_memberships hgm
+JOIN patch_policy_assignments ppa2
+  ON ppa2.target_type = 'host_group' AND ppa2.target_id = hgm.host_group_id
+WHERE ppa2.patch_policy_id = $1;
+
+-- name: ListHostIDsWithActivePatchRuns :many
+-- Hosts with a run the agent is (or is about to be) executing. 'validated' and
+-- 'pending_approval' are deliberately excluded: they wait on a human and can
+-- linger indefinitely, which would otherwise exclude the host from automated
+-- patching forever.
+SELECT DISTINCT host_id FROM patch_runs
+WHERE status IN ('queued', 'running', 'pending_validation');
+
 -- patch_policy_assignments
 -- name: GetDirectPatchPolicyAssignment :one
 SELECT pp.* FROM patch_policy_assignments ppa

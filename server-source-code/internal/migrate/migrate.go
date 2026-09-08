@@ -22,9 +22,41 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-// Run applies all pending migrations using embedded SQL files.
-// Logs to the provided logger and always prints migration status to stdout.
-// Returns an error if migrations fail.
+//go:embed migrations_fork/*.sql
+var forkMigrationsFS embed.FS
+
+// UpstreamMigrationsTable is golang-migrate's default version table, used by
+// the upstream PatchMon migration set.
+const UpstreamMigrationsTable = "schema_migrations"
+
+// ForkMigrationsTable tracks the fork-only migrations in migrations_fork/.
+//
+// golang-migrate keeps a single current version per table rather than a list
+// of applied files, so fork migrations cannot share upstream's numbering:
+// upstream reusing a number would either refuse to load (duplicate version on
+// a fresh database) or be skipped (deployed database already past it). A
+// second table gives the fork its own independent sequence.
+const ForkMigrationsTable = "schema_migrations_fork"
+
+// track is one embedded migration set together with the table that records
+// its version. Tracks run in order; the fork track assumes upstream's schema
+// is already in place.
+type track struct {
+	name  string
+	fs    embed.FS
+	dir   string
+	table string
+}
+
+var tracks = []track{
+	{name: "upstream", fs: migrationsFS, dir: "migrations", table: UpstreamMigrationsTable},
+	{name: "fork", fs: forkMigrationsFS, dir: "migrations_fork", table: ForkMigrationsTable},
+}
+
+// Run applies all pending migrations using embedded SQL files: first the
+// upstream set, then the fork set. Logs to the provided logger and always
+// prints migration status to stdout. Returns an error if any track fails; a
+// failing upstream track stops before the fork track runs.
 // ErrNoChange is treated as success (already up to date).
 func Run(databaseURL string, log *slog.Logger) error {
 	if databaseURL == "" {
@@ -36,63 +68,100 @@ func Run(databaseURL string, log *slog.Logger) error {
 	_, _ = fmt.Fprintln(os.Stdout, "[migrate] running migrations from embedded binary")
 	log.Info("running migrations", "path", "embedded")
 
-	source, err := iofs.New(migrationsFS, "migrations")
-	if err != nil {
-		return fmt.Errorf("create embedded migrate source: %w", err)
+	for _, t := range tracks {
+		if err := runTrack(t, databaseURL, log); err != nil {
+			return err
+		}
 	}
+	return nil
+}
 
-	m, err := migrate.NewWithSourceInstance("iofs", source, databaseURL)
+func runTrack(t track, databaseURL string, log *slog.Logger) error {
+	m, err := openTrack(t, databaseURL)
 	if err != nil {
-		return fmt.Errorf("create migrate instance: %w", err)
+		return err
 	}
 	defer func() { _, _ = m.Close() }()
 
+	// The dirty-recovery bookkeeping is keyed per database and table so a
+	// wedged fork track does not mask or dedupe a later upstream report.
+	recoveryKey := databaseURL + "#" + t.table
+
 	upErr := m.Up()
 	if upErr != nil && upErr != migrate.ErrNoChange {
-		fmt.Fprintf(os.Stderr, "[migrate] failed: %v\n", upErr)
+		fmt.Fprintf(os.Stderr, "[migrate] %s track failed: %v\n", t.name, upErr)
 		var dirty migrate.ErrDirty
 		if errors.As(upErr, &dirty) {
-			reportDirtyRecovery(os.Stderr, databaseURL, dirty.Version)
+			reportDirtyRecovery(os.Stderr, recoveryKey, databaseURL, t.table, dirty.Version)
 		} else {
 			// A migration actually ran and failed, so the dirty marker was just
 			// set fresh. Forget any earlier report for this database, otherwise
 			// the dirty error on the next attempt is silently deduped away at
 			// exactly the point the operator needs the guidance repeated.
-			forgetDirtyRecovery(databaseURL)
+			forgetDirtyRecovery(recoveryKey)
 		}
-		return fmt.Errorf("migration up: %w", upErr)
+		return fmt.Errorf("migration up (%s track): %w", t.name, upErr)
 	}
 
-	forgetDirtyRecovery(databaseURL)
+	forgetDirtyRecovery(recoveryKey)
 
 	if upErr == migrate.ErrNoChange {
-		_, _ = fmt.Fprintln(os.Stdout, "[migrate] already up to date")
-		log.Info("migrations: already up to date")
+		_, _ = fmt.Fprintf(os.Stdout, "[migrate] %s track already up to date\n", t.name)
+		log.Info("migrations: already up to date", "track", t.name)
 		return nil
 	}
 
 	version, _, _ := m.Version()
-	msg := fmt.Sprintf("[migrate] applied successfully (version %d)", version)
-	_, _ = fmt.Fprintln(os.Stdout, msg)
-	log.Info("migrations applied successfully", "version", version)
+	_, _ = fmt.Fprintf(os.Stdout, "[migrate] %s track applied successfully (version %d)\n", t.name, version)
+	log.Info("migrations applied successfully", "track", t.name, "version", version)
 	return nil
 }
 
-// Open returns a migrate instance using embedded migrations, for use by the CLI (up/down/force/version).
-// Caller must call m.Close() when done.
+func openTrack(t track, databaseURL string) (*migrate.Migrate, error) {
+	source, err := iofs.New(t.fs, t.dir)
+	if err != nil {
+		return nil, fmt.Errorf("create embedded migrate source (%s track): %w", t.name, err)
+	}
+	m, err := migrate.NewWithSourceInstance("iofs", source, withMigrationsTable(databaseURL, t.table))
+	if err != nil {
+		return nil, fmt.Errorf("create migrate instance (%s track): %w", t.name, err)
+	}
+	return m, nil
+}
+
+// Open returns a migrate instance for the upstream track, for use by the CLI
+// (up/down/force/version). Caller must call m.Close() when done.
 func Open(databaseURL string) (*migrate.Migrate, error) {
 	if databaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required for migrations")
 	}
+	return openTrack(tracks[0], ensureSSLMode(databaseURL))
+}
 
-	databaseURL = ensureSSLMode(databaseURL)
-
-	source, err := iofs.New(migrationsFS, "migrations")
-	if err != nil {
-		return nil, fmt.Errorf("create embedded migrate source: %w", err)
+// OpenFork returns a migrate instance for the fork track, for use by the CLI.
+// Caller must call m.Close() when done.
+func OpenFork(databaseURL string) (*migrate.Migrate, error) {
+	if databaseURL == "" {
+		return nil, fmt.Errorf("DATABASE_URL is required for migrations")
 	}
+	return openTrack(tracks[1], ensureSSLMode(databaseURL))
+}
 
-	return migrate.NewWithSourceInstance("iofs", source, databaseURL)
+// withMigrationsTable points the postgres driver at a specific version table
+// via its x-migrations-table query parameter. The default table is left
+// implicit so upstream's DSN handling is untouched for the upstream track.
+func withMigrationsTable(databaseURL, table string) string {
+	if table == "" || table == UpstreamMigrationsTable {
+		return databaseURL
+	}
+	if strings.Contains(databaseURL, "x-migrations-table=") {
+		return databaseURL
+	}
+	sep := "?"
+	if strings.Contains(databaseURL, "?") {
+		sep = "&"
+	}
+	return databaseURL + sep + "x-migrations-table=" + url.QueryEscape(table)
 }
 
 // dirtyRecoveryReported tracks the dirty version already reported per database,
@@ -112,8 +181,8 @@ func dirtyRecoveryKey(databaseURL string) string {
 // not shipped in the server image, so the recovery is given as SQL. It reports
 // whether it wrote anything, which is false when the same database is already
 // known to be dirty at the same version.
-func reportDirtyRecovery(w io.Writer, databaseURL string, version int) bool {
-	key := dirtyRecoveryKey(databaseURL)
+func reportDirtyRecovery(w io.Writer, recoveryKey, databaseURL, table string, version int) bool {
+	key := dirtyRecoveryKey(recoveryKey)
 
 	dirtyRecoveryMu.Lock()
 	last, seen := dirtyRecoveryReported[key]
@@ -124,26 +193,29 @@ func reportDirtyRecovery(w io.Writer, databaseURL string, version int) bool {
 	dirtyRecoveryReported[key] = version
 	dirtyRecoveryMu.Unlock()
 
-	_, _ = fmt.Fprint(w, dirtyRecoveryMessage(databaseURL, version))
+	_, _ = fmt.Fprint(w, dirtyRecoveryMessage(databaseURL, table, version))
 	return true
 }
 
 // forgetDirtyRecovery drops a database's recorded dirty version once migrations
 // get past it, so a later dirty episode reports again.
-func forgetDirtyRecovery(databaseURL string) {
+func forgetDirtyRecovery(recoveryKey string) {
 	dirtyRecoveryMu.Lock()
-	delete(dirtyRecoveryReported, dirtyRecoveryKey(databaseURL))
+	delete(dirtyRecoveryReported, dirtyRecoveryKey(recoveryKey))
 	dirtyRecoveryMu.Unlock()
 }
 
-func dirtyRecoveryMessage(databaseURL string, version int) string {
+func dirtyRecoveryMessage(databaseURL, table string, version int) string {
+	if table == "" {
+		table = UpstreamMigrationsTable
+	}
 	// Version 1 has no predecessor to roll back to, and forcing version 0 leaves
 	// the marker clean but pointing at a migration that does not exist, which is
 	// harder to recover from than the dirty state. Clearing the table is what
 	// `migrate force -1` does and is the only way back from a dirty first migration.
-	recovery := fmt.Sprintf("UPDATE schema_migrations SET version = %d, dirty = false;", version-1)
+	recovery := fmt.Sprintf("UPDATE %s SET version = %d, dirty = false;", table, version-1)
 	if version <= 1 {
-		recovery = "DELETE FROM schema_migrations;"
+		recovery = fmt.Sprintf("DELETE FROM %s;", table)
 	}
 
 	return fmt.Sprintf(`

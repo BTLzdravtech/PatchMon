@@ -2,6 +2,7 @@
 package system
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"patchmon-agent/internal/logutil"
 	"patchmon-agent/internal/winexec"
@@ -512,4 +514,99 @@ func (d *Detector) resolveMetaPackage(metaPkg string) string {
 	}
 
 	return ""
+}
+
+// ExecuteReboot schedules a system reboot. delayMinutes is clamped to [0, 60]
+// to bound the operator surprise window. delayMinutes=0 reboots immediately.
+// The shutdown command is fire-and-forget — we do not wait for it to complete
+// because the process gets killed by the reboot itself. The function returns
+// once shutdown has been scheduled (or returns the error from spawning it).
+//
+// On Linux/BSD it shells out to `shutdown -r +N` so that any running tty
+// users see the broadcast wall and the system passes through normal
+// signal-everyone -> stop-services -> reboot ordering. On Windows it uses
+// `shutdown /r /t <seconds>`.
+//
+// Reason is appended to the broadcast so logs/wall messages explain why the
+// host is rebooting. Empty reason falls back to a generic string.
+func (d *Detector) ExecuteReboot(delayMinutes int, reason string) error {
+	if delayMinutes < 0 {
+		delayMinutes = 0
+	}
+	if delayMinutes > 60 {
+		delayMinutes = 60
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "Triggered by PatchMon"
+	}
+
+	if runtime.GOOS == "windows" {
+		// /r reboot, /t seconds, /c comment (max 512 chars; truncate defensively)
+		comment := reason
+		if len(comment) > 500 {
+			comment = comment[:500]
+		}
+		cmd := exec.Command("shutdown", "/r", "/t", strconv.Itoa(delayMinutes*60), "/c", comment)
+		if err := runShutdownCommand(cmd, "shutdown /r"); err != nil {
+			return err
+		}
+		d.logger.WithField("delay_minutes", delayMinutes).WithField("reason", logutil.Sanitize(reason)).Info("Reboot scheduled via shutdown /r")
+		return nil
+	}
+
+	// Linux/BSD: shutdown -r accepts "+N" minutes or "now".
+	timeArg := "+" + strconv.Itoa(delayMinutes)
+	if delayMinutes == 0 {
+		timeArg = "now"
+	}
+	cmd := exec.Command("shutdown", "-r", timeArg, reason)
+	if err := runShutdownCommand(cmd, "shutdown -r "+timeArg); err != nil {
+		return err
+	}
+	d.logger.WithField("delay_minutes", delayMinutes).WithField("reason", logutil.Sanitize(reason)).Info("Reboot scheduled via shutdown -r")
+	return nil
+}
+
+// shutdownExitWait bounds how long ExecuteReboot waits for shutdown to
+// return. systemd, BSD and Windows shutdown all return as soon as the reboot
+// is scheduled, so a command still running after this long is treated as
+// scheduled rather than failed (some legacy implementations stay in the
+// foreground until the deadline).
+const shutdownExitWait = 15 * time.Second
+
+// runShutdownCommand starts cmd and waits for it so a non-zero exit is
+// reported instead of swallowed. Previously only Start() was checked, which
+// meant molly-guard aborting on a missing hostname confirmation, a permission
+// denial, or "shutdown: already running" all looked like success: the agent
+// logged "scheduled", the server marked the job complete, and the host never
+// rebooted. stdin is /dev/null so interactive guards fail fast rather than
+// hang.
+func runShutdownCommand(cmd *exec.Cmd, desc string) error {
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("%s failed to start: %w", desc, err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			msg := strings.TrimSpace(out.String())
+			if len(msg) > 500 {
+				msg = msg[:500]
+			}
+			if msg != "" {
+				return fmt.Errorf("%s failed: %w: %s", desc, err, msg)
+			}
+			return fmt.Errorf("%s failed: %w", desc, err)
+		}
+		return nil
+	case <-time.After(shutdownExitWait):
+		// Still running: reap it in the background so it does not linger as a
+		// zombie, and treat the reboot as scheduled.
+		go func() { <-done }()
+		return nil
+	}
 }

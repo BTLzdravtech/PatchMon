@@ -268,6 +268,20 @@ func (s *HostsStore) UpdateAutoUpdate(ctx context.Context, id string, autoUpdate
 	})
 }
 
+// UpdateAutoUpdateMany flips auto_update for many hosts in one statement.
+// Returns the number of rows actually updated (callers can use this to detect
+// stale host_ids in the request).
+func (s *HostsStore) UpdateAutoUpdateMany(ctx context.Context, ids []string, autoUpdate bool) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	d := s.db.DB(ctx)
+	return d.Queries.UpdateHostsAutoUpdateMany(ctx, db.UpdateHostsAutoUpdateManyParams{
+		AutoUpdate: autoUpdate,
+		HostIds:    ids,
+	})
+}
+
 // UpdateHostDownAlerts updates a host's host_down_alerts_enabled setting.
 func (s *HostsStore) UpdateHostDownAlerts(ctx context.Context, id string, enabled *bool) error {
 	d := s.db.DB(ctx)

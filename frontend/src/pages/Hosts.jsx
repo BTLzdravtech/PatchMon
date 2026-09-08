@@ -25,6 +25,8 @@ import {
 	FolderPlus,
 	GripVertical,
 	Plus,
+	Power,
+	PowerOff,
 	RefreshCw,
 	RotateCcw,
 	Search,
@@ -34,6 +36,7 @@ import {
 	Trash2,
 	Wifi,
 	WifiOff,
+	Wrench,
 	X,
 } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
@@ -43,7 +46,9 @@ import HostStatusPills from "../components/HostStatusPills";
 import InlineEdit from "../components/InlineEdit";
 import InlineMultiGroupEdit from "../components/InlineMultiGroupEdit";
 import InlineToggle from "../components/InlineToggle";
+import PatchWizard from "../components/PatchWizard";
 import Tooltip from "../components/ui/Tooltip";
+import { useAuth } from "../contexts/AuthContext";
 import { usePageRefresh } from "../hooks/usePageRefresh";
 import { useTick } from "../hooks/useTick";
 import {
@@ -146,6 +151,9 @@ const Hosts = () => {
 	);
 	const [showBulkAssignModal, setShowBulkAssignModal] = useState(false);
 	const [showBulkDeleteModal, setShowBulkDeleteModal] = useState(false);
+	const [showBulkPatchModal, setShowBulkPatchModal] = useState(false);
+	const { canManageHosts } = useAuth();
+	const [showBulkRebootModal, setShowBulkRebootModal] = useState(false);
 	const [bulkFetchReportMessage, setBulkFetchReportMessage] = useState({
 		text: "",
 		type: "success", // "success" or "error"
@@ -797,6 +805,92 @@ const Hosts = () => {
 		},
 	});
 
+	const bulkRebootMutation = useMutation({
+		mutationFn: (hostIds) =>
+			adminHostsAPI
+				.bulkRebootHosts(hostIds, { delayMinutes: 1 })
+				.then((res) => res.data),
+		onSuccess: (data) => {
+			queryClient.invalidateQueries({ queryKey: ["hosts"] });
+			setShowBulkRebootModal(false);
+			setBulkFetchReportMessage({
+				text: data?.message || `Reboot queued for ${data?.queued || 0} host(s)`,
+				type: "success",
+			});
+			setTimeout(
+				() => setBulkFetchReportMessage({ text: "", type: "success" }),
+				5000,
+			);
+		},
+		onError: (error) => {
+			setBulkFetchReportMessage({
+				text: error.response?.data?.error || "Failed to queue reboots",
+				type: "error",
+			});
+			setTimeout(
+				() => setBulkFetchReportMessage({ text: "", type: "error" }),
+				5000,
+			);
+		},
+	});
+
+	const bulkAutoUpdateMutation = useMutation({
+		mutationFn: ({ hostIds, autoUpdate }) =>
+			adminHostsAPI
+				.bulkUpdateAutoUpdate(hostIds, autoUpdate)
+				.then((res) => res.data),
+		onSuccess: (data) => {
+			queryClient.invalidateQueries({ queryKey: ["hosts"] });
+			setBulkFetchReportMessage({
+				text: data?.message || "Auto-update setting updated",
+				type: "success",
+			});
+			setTimeout(
+				() => setBulkFetchReportMessage({ text: "", type: "success" }),
+				5000,
+			);
+		},
+		onError: (error) => {
+			setBulkFetchReportMessage({
+				text:
+					error.response?.data?.error || "Failed to update auto-update setting",
+				type: "error",
+			});
+			setTimeout(
+				() => setBulkFetchReportMessage({ text: "", type: "error" }),
+				5000,
+			);
+		},
+	});
+
+	const bulkForceAgentUpdateMutation = useMutation({
+		mutationFn: (hostIds) =>
+			adminHostsAPI.bulkForceAgentUpdate(hostIds).then((res) => res.data),
+		onSuccess: (data) => {
+			queryClient.invalidateQueries({ queryKey: ["hosts"] });
+			setBulkFetchReportMessage({
+				text:
+					data?.message ||
+					`Agent update queued for ${data?.queued || 0} host(s)`,
+				type: "success",
+			});
+			setTimeout(
+				() => setBulkFetchReportMessage({ text: "", type: "success" }),
+				5000,
+			);
+		},
+		onError: (error) => {
+			setBulkFetchReportMessage({
+				text: error.response?.data?.error || "Failed to queue agent updates",
+				type: "error",
+			});
+			setTimeout(
+				() => setBulkFetchReportMessage({ text: "", type: "error" }),
+				5000,
+			);
+		},
+	});
+
 	const bulkFetchReportMutation = useMutation({
 		mutationFn: (hostIds) =>
 			adminHostsAPI.fetchReportBulk(hostIds).then((res) => res.data),
@@ -876,6 +970,58 @@ const Hosts = () => {
 	const handleBulkFetchReport = () => {
 		bulkFetchReportMutation.mutate(selectedHosts);
 	};
+
+	// Selections persist across server-side pages, but `hosts` is only the
+	// current page. Bulk patch and bulk reboot need OS / needs_reboot for every
+	// selected host, so fetch the selected set explicitly (the dashboard hosts
+	// endpoint supports filter=selected for exactly this). Until it arrives,
+	// fall back to whatever is on the current page.
+	const { data: selectedHostDetails } = useQuery({
+		queryKey: ["hosts", "selected-details", selectedHosts],
+		queryFn: () =>
+			dashboardAPI
+				.getHosts({ filter: "selected", selected: selectedHosts.join(",") })
+				.then((res) =>
+					Array.isArray(res.data) ? res.data : res.data?.items || [],
+				),
+		enabled: selectedHosts.length > 0,
+		placeholderData: keepPreviousData,
+	});
+	const selectedHostRecords = useMemo(() => {
+		if (selectedHosts.length === 0) return [];
+		const source =
+			selectedHostDetails && selectedHostDetails.length > 0
+				? selectedHostDetails
+				: hosts || [];
+		return source.filter((h) => selectedHostsSet.has(h.id));
+	}, [selectedHostDetails, hosts, selectedHosts, selectedHostsSet]);
+
+	// Hosts the bulk patch flow can actually target. Windows hosts are excluded
+	// because the agent does not patch them; the wizard would also drop them,
+	// but we filter here so the button reflects reality before opening it.
+	const bulkPatchablePresetHosts = useMemo(
+		() =>
+			selectedHostRecords
+				.filter((h) => !(h.os_type || "").toLowerCase().includes("windows"))
+				.map((h) => ({
+					id: h.id,
+					friendly_name: h.friendly_name,
+					hostname: h.hostname,
+				})),
+		[selectedHostRecords],
+	);
+	const bulkPatchSkippedCount =
+		selectedHosts.length - bulkPatchablePresetHosts.length;
+	// Hosts in the current selection that the agent has flagged as needing a
+	// reboot. Bulk reboot only acts on these — we never reboot a host that
+	// didn't ask for it, even if the operator selected it by accident. The
+	// confirm modal surfaces this filtered count.
+	const selectedRebootCandidates = useMemo(
+		() => selectedHostRecords.filter((h) => h.needs_reboot === true),
+		[selectedHostRecords],
+	);
+	const selectedRebootSkipped =
+		selectedHosts.length - selectedRebootCandidates.length;
 
 	// Resolve selected host IDs for filter=selected (from URL or state)
 	const selectedHostIdsForFilter = useMemo(() => {
@@ -1973,6 +2119,111 @@ const Hosts = () => {
 									<span className="hidden sm:inline">Fetch Reports</span>
 									<span className="sm:hidden">Fetch</span>
 								</button>
+								{canManageHosts() && (
+									<button
+										type="button"
+										onClick={() => setShowBulkPatchModal(true)}
+										disabled={bulkPatchablePresetHosts.length === 0}
+										className="btn-outline flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 min-h-[44px] text-xs sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+										title={
+											bulkPatchablePresetHosts.length === 0
+												? "No patchable hosts selected (Windows hosts cannot be patched via PatchMon)"
+												: bulkPatchSkippedCount > 0
+													? `Patch all available updates on ${bulkPatchablePresetHosts.length} host${bulkPatchablePresetHosts.length !== 1 ? "s" : ""} (${bulkPatchSkippedCount} Windows host${bulkPatchSkippedCount !== 1 ? "s" : ""} will be skipped)`
+													: "Patch all available updates on the selected hosts"
+										}
+									>
+										<Wrench className="h-4 w-4 flex-shrink-0" />
+										<span className="hidden sm:inline">
+											Patch Selected
+											{bulkPatchSkippedCount > 0
+												? ` (${bulkPatchablePresetHosts.length})`
+												: ""}
+										</span>
+										<span className="sm:hidden">Patch</span>
+									</button>
+								)}
+								{canManageHosts() && (
+									<button
+										type="button"
+										onClick={() => setShowBulkRebootModal(true)}
+										disabled={selectedRebootCandidates.length === 0}
+										className="btn-outline flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 min-h-[44px] text-xs sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+										title={
+											selectedRebootCandidates.length === 0
+												? "No selected hosts are flagged as needing a reboot"
+												: selectedRebootSkipped > 0
+													? `Reboot ${selectedRebootCandidates.length} host${selectedRebootCandidates.length !== 1 ? "s" : ""} that need it (${selectedRebootSkipped} skipped — not flagged)`
+													: `Reboot ${selectedRebootCandidates.length} host${selectedRebootCandidates.length !== 1 ? "s" : ""} that need it`
+										}
+									>
+										<Power className="h-4 w-4 flex-shrink-0" />
+										<span className="hidden sm:inline">
+											Reboot
+											{selectedRebootCandidates.length > 0
+												? ` (${selectedRebootCandidates.length})`
+												: ""}
+										</span>
+										<span className="sm:hidden">Reboot</span>
+									</button>
+								)}
+								{canManageHosts() && (
+									<button
+										type="button"
+										onClick={() =>
+											bulkForceAgentUpdateMutation.mutate(selectedHosts)
+										}
+										disabled={bulkForceAgentUpdateMutation.isPending}
+										className="btn-outline flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 min-h-[44px] text-xs sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+										title="Force-update the patchmon-agent on the selected hosts (bypasses the per-host auto_update flag)"
+									>
+										<RotateCcw
+											className={`h-4 w-4 flex-shrink-0 ${
+												bulkForceAgentUpdateMutation.isPending
+													? "animate-spin"
+													: ""
+											}`}
+										/>
+										<span className="hidden sm:inline">Update Agents</span>
+										<span className="sm:hidden">Update</span>
+									</button>
+								)}
+								{canManageHosts() && (
+									<>
+										<button
+											type="button"
+											onClick={() =>
+												bulkAutoUpdateMutation.mutate({
+													hostIds: selectedHosts,
+													autoUpdate: true,
+												})
+											}
+											disabled={bulkAutoUpdateMutation.isPending}
+											className="btn-outline flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 min-h-[44px] text-xs sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+											title="Enable agent auto-update on the selected hosts"
+										>
+											<Power className="h-4 w-4 flex-shrink-0" />
+											<span className="hidden sm:inline">Auto-update On</span>
+											<span className="sm:hidden">On</span>
+										</button>
+										<button
+											type="button"
+											onClick={() =>
+												bulkAutoUpdateMutation.mutate({
+													hostIds: selectedHosts,
+													autoUpdate: false,
+												})
+											}
+											disabled={bulkAutoUpdateMutation.isPending}
+											className="btn-outline flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 min-h-[44px] text-xs sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+											title="Disable agent auto-update on the selected hosts"
+										>
+											<PowerOff className="h-4 w-4 flex-shrink-0" />
+											<span className="hidden sm:inline">Auto-update Off</span>
+											<span className="sm:hidden">Off</span>
+										</button>
+									</>
+								)}
 								<button
 									type="button"
 									onClick={() => setShowBulkAssignModal(true)}
@@ -2729,6 +2980,87 @@ const Hosts = () => {
 					onDelete={handleBulkDelete}
 					isLoading={bulkDeleteMutation.isPending}
 				/>
+			)}
+
+			{/* Bulk Patch Wizard (patch_all across multiple hosts) */}
+			{showBulkPatchModal && bulkPatchablePresetHosts.length > 0 && (
+				<PatchWizard
+					isOpen={showBulkPatchModal}
+					onClose={() => setShowBulkPatchModal(false)}
+					mode="trigger"
+					patchType="patch_all"
+					lockHosts
+					presetHosts={bulkPatchablePresetHosts}
+					onSuccess={() => {
+						setShowBulkPatchModal(false);
+						queryClient.invalidateQueries({ queryKey: ["patching-runs"] });
+						queryClient.invalidateQueries({ queryKey: ["patching-dashboard"] });
+					}}
+				/>
+			)}
+
+			{/* Bulk Reboot Confirm Modal */}
+			{showBulkRebootModal && (
+				<div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+					<div className="bg-white dark:bg-secondary-800 rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden">
+						<div className="p-6">
+							<div className="flex items-start gap-4">
+								<div className="flex-shrink-0 w-10 h-10 rounded-full bg-orange-100 dark:bg-orange-900/30 flex items-center justify-center">
+									<Power className="h-5 w-5 text-orange-600 dark:text-orange-400" />
+								</div>
+								<div className="flex-1">
+									<h3 className="text-lg font-semibold text-secondary-900 dark:text-white mb-2">
+										Reboot {selectedRebootCandidates.length} host
+										{selectedRebootCandidates.length !== 1 ? "s" : ""}?
+									</h3>
+									<p className="text-sm text-secondary-600 dark:text-white/80 mb-3">
+										Each agent will run <code>shutdown -r +1</code> (one minute
+										warning). The hosts will be unreachable for a few minutes.
+										Only hosts flagged as needing a reboot are included.
+									</p>
+									{selectedRebootSkipped > 0 && (
+										<p className="text-xs text-amber-600 dark:text-amber-400 mb-3">
+											{selectedRebootSkipped} selected host
+											{selectedRebootSkipped !== 1 ? "s" : ""} not flagged as
+											needing reboot, will be skipped.
+										</p>
+									)}
+									<div className="max-h-40 overflow-y-auto text-xs font-mono text-secondary-700 dark:text-white/70 border border-secondary-200 dark:border-secondary-600 rounded p-2 mb-4">
+										{selectedRebootCandidates.map((h) => (
+											<div key={h.id}>
+												{h.friendly_name || h.hostname || h.id}
+											</div>
+										))}
+									</div>
+								</div>
+							</div>
+							<div className="flex justify-end gap-2">
+								<button
+									type="button"
+									onClick={() => setShowBulkRebootModal(false)}
+									disabled={bulkRebootMutation.isPending}
+									className="btn-outline px-4 py-2"
+								>
+									Cancel
+								</button>
+								<button
+									type="button"
+									onClick={() =>
+										bulkRebootMutation.mutate(
+											selectedRebootCandidates.map((h) => h.id),
+										)
+									}
+									disabled={bulkRebootMutation.isPending}
+									className="btn-danger px-4 py-2"
+								>
+									{bulkRebootMutation.isPending
+										? "Queueing..."
+										: `Reboot ${selectedRebootCandidates.length}`}
+								</button>
+							</div>
+						</div>
+					</div>
+				</div>
 			)}
 
 			{/* Column Settings Modal */}

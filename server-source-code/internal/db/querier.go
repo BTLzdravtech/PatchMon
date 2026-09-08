@@ -100,6 +100,12 @@ type Querier interface {
 	// Re-parsing the JSON here is cheap (kilobytes, in-memory) and avoids a
 	// per-row round-trip — the alternative was a SELECT loop in Go.
 	BulkUpsertPackages(ctx context.Context, payload []byte) ([]BulkUpsertPackagesRow, error)
+	// Atomically claims one automated-patching slot. Returns 1 row when this
+	// caller won the slot and 0 when another dispatcher already stamped it (or a
+	// later one), so concurrent scheduler ticks or replicas cannot double-fire.
+	// The slot instant itself is stored (not NOW()) so the app-side comparison in
+	// autoPatchDueSlot is not affected by DB/app clock skew.
+	ClaimPatchPolicyAutoPatchSlot(ctx context.Context, arg ClaimPatchPolicyAutoPatchSlotParams) (int64, error)
 	ClearHostComplianceHashOnEnable(ctx context.Context, arg ClearHostComplianceHashOnEnableParams) error
 	// Force a fresh docker payload on next check-in by NULLing the hash whenever
 	// the operator re-enables docker. If the agent was already streaming docker
@@ -475,6 +481,7 @@ type Querier interface {
 	ListAlertConfig(ctx context.Context) ([]ListAlertConfigRow, error)
 	ListAlertHistoryByAlertID(ctx context.Context, alertID string) ([]ListAlertHistoryByAlertIDRow, error)
 	ListAutoEnrollmentTokens(ctx context.Context) ([]ListAutoEnrollmentTokensRow, error)
+	ListAutoPatchPolicies(ctx context.Context) ([]PatchPolicy, error)
 	ListComplianceProfiles(ctx context.Context) ([]ComplianceProfile, error)
 	ListComplianceResultsByScan(ctx context.Context, arg ListComplianceResultsByScanParams) ([]ListComplianceResultsByScanRow, error)
 	ListComplianceRulesByProfile(ctx context.Context, profileID string) ([]ComplianceRule, error)
@@ -486,6 +493,11 @@ type Querier interface {
 	ListExistingHostApiIDs(ctx context.Context, dollar_1 []string) ([]string, error)
 	ListHostGroups(ctx context.Context) ([]HostGroup, error)
 	ListHostGroupsWithHostCount(ctx context.Context) ([]ListHostGroupsWithHostCountRow, error)
+	// Hosts with a run the agent is (or is about to be) executing. 'validated' and
+	// 'pending_approval' are deliberately excluded: they wait on a human and can
+	// linger indefinitely, which would otherwise exclude the host from automated
+	// patching forever.
+	ListHostIDsWithActivePatchRuns(ctx context.Context) ([]string, error)
 	ListHostOptions(ctx context.Context, arg ListHostOptionsParams) ([]ListHostOptionsRow, error)
 	ListHosts(ctx context.Context) ([]Host, error)
 	ListHostsForComplianceDashboard(ctx context.Context) ([]ListHostsForComplianceDashboardRow, error)
@@ -509,6 +521,7 @@ type Querier interface {
 	ListPatchPolicyAssignmentsByPolicy(ctx context.Context, patchPolicyID string) ([]PatchPolicyAssignment, error)
 	// patch_policy_exclusions
 	ListPatchPolicyExclusions(ctx context.Context, patchPolicyID string) ([]ListPatchPolicyExclusionsRow, error)
+	ListPatchPolicyTargetHostIDs(ctx context.Context, patchPolicyID string) ([]string, error)
 	// The 'status' filter accepts an exact status value. The pseudo-value
 	// 'active' matches any in-flight run (queued or running) so UI widgets
 	// that aggregate those two states can link to a single filter.
@@ -596,6 +609,7 @@ type Querier interface {
 	UpdateHostPing(ctx context.Context, id string) error
 	UpdateHostPrimaryInterface(ctx context.Context, arg UpdateHostPrimaryInterfaceParams) error
 	UpdateHostRebootStatus(ctx context.Context, arg UpdateHostRebootStatusParams) error
+	UpdateHostsAutoUpdateMany(ctx context.Context, arg UpdateHostsAutoUpdateManyParams) (int64, error)
 	UpdateJobHistoryCompleted(ctx context.Context, jobID string) error
 	UpdateJobHistoryDelayed(ctx context.Context, jobID string) error
 	UpdateJobHistoryFailed(ctx context.Context, arg UpdateJobHistoryFailedParams) error
@@ -604,6 +618,7 @@ type Querier interface {
 	UpdateNotificationRoute(ctx context.Context, arg UpdateNotificationRouteParams) (NotificationRoute, error)
 	UpdatePassword(ctx context.Context, arg UpdatePasswordParams) error
 	UpdatePatchPolicy(ctx context.Context, arg UpdatePatchPolicyParams) error
+	UpdatePatchPolicyAutoPatch(ctx context.Context, arg UpdatePatchPolicyAutoPatchParams) error
 	// Terminal cancelled state set by the agent's late "cancelled" stage report.
 	// Replaces shell_output with the full captured output so rollback/cleanup text is preserved.
 	// :execrows so the handler can detect concurrent termination (rows=0) cleanly.

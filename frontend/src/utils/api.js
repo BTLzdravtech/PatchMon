@@ -193,6 +193,24 @@ export const adminHostsAPI = {
 			host_down_alerts_enabled: enabled,
 		}),
 	forceAgentUpdate: (hostId) => api.post(`/hosts/${hostId}/force-agent-update`),
+	rebootHost: (hostId, opts = {}) =>
+		api.post(`/hosts/${hostId}/reboot`, {
+			delay_minutes: opts.delayMinutes,
+			reason: opts.reason,
+		}),
+	bulkRebootHosts: (hostIds, opts = {}) =>
+		api.post("/hosts/bulk/reboot", {
+			hostIds,
+			delay_minutes: opts.delayMinutes,
+			reason: opts.reason,
+		}),
+	bulkUpdateAutoUpdate: (hostIds, autoUpdate) =>
+		api.patch("/hosts/bulk/auto-update", {
+			hostIds,
+			auto_update: autoUpdate,
+		}),
+	bulkForceAgentUpdate: (hostIds) =>
+		api.post("/hosts/bulk/force-agent-update", { hostIds }),
 	refreshIntegrationStatus: (hostId) =>
 		api.post(`/hosts/${hostId}/refresh-integration-status`),
 	fetchReport: (hostId) => api.post(`/hosts/${hostId}/fetch-report`),

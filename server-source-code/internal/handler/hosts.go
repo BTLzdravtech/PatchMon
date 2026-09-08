@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/PatchMon/PatchMon/server-source-code/internal/agentregistry"
@@ -156,6 +157,9 @@ func (h *HostsHandler) Create(w http.ResponseWriter, r *http.Request) {
 		DockerEnabled     *bool    `json:"docker_enabled"`
 		ComplianceEnabled *bool    `json:"compliance_enabled"`
 		ExpectedPlatform  *string  `json:"expected_platform"`
+		// AutoUpdate sets the per-host agent auto-update flag. Omit to inherit
+		// the global agent auto-update setting.
+		AutoUpdate *bool `json:"auto_update"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		Error(w, http.StatusBadRequest, "Invalid request body")
@@ -202,6 +206,7 @@ func (h *HostsHandler) Create(w http.ResponseWriter, r *http.Request) {
 		ApiID:                  apiID,
 		ApiKey:                 apiKeyHash,
 		DockerEnabled:          req.DockerEnabled != nil && *req.DockerEnabled,
+		AutoUpdate:             newHostAutoUpdate(r.Context(), h.settings, req.AutoUpdate),
 		ComplianceEnabled:      complianceEnabled,
 		ComplianceOnDemandOnly: complianceOnDemandOnly,
 		ExpectedPlatform:       req.ExpectedPlatform,
@@ -670,6 +675,221 @@ func (h *HostsHandler) RefreshDocker(w http.ResponseWriter, r *http.Request) {
 			"friendlyName": host.FriendlyName,
 			"apiId":        host.ApiID,
 		},
+	})
+}
+
+// RebootHost handles POST /hosts/:hostId/reboot.
+// Body: { delay_minutes?: int (default 1), reason?: string }
+func (h *HostsHandler) RebootHost(w http.ResponseWriter, r *http.Request) {
+	if h.queueClient == nil {
+		Error(w, http.StatusServiceUnavailable, "Queue service unavailable")
+		return
+	}
+	hostID := chi.URLParam(r, "hostId")
+	var body struct {
+		DelayMinutes *int   `json:"delay_minutes"`
+		Reason       string `json:"reason"`
+		// Force reboots a host that is not flagged needs_reboot. Without it
+		// the server enforces the same rule the UI promises: only hosts that
+		// asked for a reboot get one.
+		Force bool `json:"force"`
+	}
+	_ = decodeJSON(r, &body) // body is optional
+	delay := 1
+	if body.DelayMinutes != nil {
+		delay = *body.DelayMinutes
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	if delay > 60 {
+		delay = 60
+	}
+	reason := body.Reason
+	if reason == "" {
+		reason = "Triggered by PatchMon operator"
+	}
+	host, err := h.hosts.GetByID(r.Context(), hostID)
+	if err != nil || host == nil {
+		Error(w, http.StatusNotFound, "Host not found")
+		return
+	}
+	if !body.Force && !hostNeedsReboot(host) {
+		Error(w, http.StatusConflict, "Host is not flagged as needing a reboot (pass force=true to reboot anyway)")
+		return
+	}
+	task, err := queue.NewRebootHostTask(host.ApiID, hostFromRequest(r), delay, reason)
+	if err != nil {
+		Error(w, http.StatusInternalServerError, "Failed to create reboot task")
+		return
+	}
+	info, err := h.queueClient.Enqueue(task)
+	if err != nil {
+		Error(w, http.StatusInternalServerError, "Failed to queue reboot")
+		return
+	}
+	JSON(w, http.StatusOK, map[string]interface{}{
+		"success":      true,
+		"message":      "Reboot queued",
+		"jobId":        info.ID,
+		"delayMinutes": delay,
+		"host": map[string]interface{}{
+			"id":           host.ID,
+			"friendlyName": host.FriendlyName,
+			"apiId":        host.ApiID,
+		},
+	})
+}
+
+// BulkRebootHosts handles POST /hosts/bulk/reboot.
+// Body: { hostIds: [...], delay_minutes?: int, reason?: string }
+func (h *HostsHandler) BulkRebootHosts(w http.ResponseWriter, r *http.Request) {
+	if h.queueClient == nil {
+		Error(w, http.StatusServiceUnavailable, "Queue service unavailable")
+		return
+	}
+	var body struct {
+		HostIds      []string `json:"hostIds"`
+		DelayMinutes *int     `json:"delay_minutes"`
+		Reason       string   `json:"reason"`
+		// Force skips the needs_reboot check; see RebootHost.
+		Force bool `json:"force"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		Error(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if len(body.HostIds) == 0 {
+		Error(w, http.StatusBadRequest, "At least one host ID is required")
+		return
+	}
+	delay := 1
+	if body.DelayMinutes != nil {
+		delay = *body.DelayMinutes
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	if delay > 60 {
+		delay = 60
+	}
+	reason := body.Reason
+	if reason == "" {
+		reason = "Triggered by PatchMon operator (bulk)"
+	}
+
+	hostHeader := hostFromRequest(r)
+	queued := 0
+	failures := []map[string]string{}
+	for _, id := range body.HostIds {
+		host, err := h.hosts.GetByID(r.Context(), id)
+		if err != nil || host == nil {
+			failures = append(failures, map[string]string{"hostId": id, "reason": "not_found"})
+			continue
+		}
+		if !body.Force && !hostNeedsReboot(host) {
+			// Enforced server-side because the client's list can be stale: the
+			// agent may have cleared the flag after the page loaded.
+			failures = append(failures, map[string]string{"hostId": id, "reason": "not_flagged"})
+			continue
+		}
+		task, err := queue.NewRebootHostTask(host.ApiID, hostHeader, delay, reason)
+		if err != nil {
+			failures = append(failures, map[string]string{"hostId": id, "reason": "task_create_failed"})
+			continue
+		}
+		if _, err := h.queueClient.Enqueue(task); err != nil {
+			failures = append(failures, map[string]string{"hostId": id, "reason": "enqueue_failed"})
+			continue
+		}
+		queued++
+	}
+	JSON(w, http.StatusOK, map[string]interface{}{
+		"message":      "Reboot queued for " + strconv.Itoa(queued) + " of " + strconv.Itoa(len(body.HostIds)) + " host(s)",
+		"queued":       queued,
+		"delayMinutes": delay,
+		"failures":     failures,
+	})
+}
+
+// hostNeedsReboot reports whether the agent has flagged a pending reboot.
+func hostNeedsReboot(h *models.Host) bool {
+	return h != nil && h.NeedsReboot != nil && *h.NeedsReboot
+}
+
+// BulkUpdateAutoUpdate handles PATCH /hosts/bulk/auto-update.
+// Body: { hostIds: [...], auto_update: bool }
+func (h *HostsHandler) BulkUpdateAutoUpdate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		HostIds    []string `json:"hostIds"`
+		AutoUpdate bool     `json:"auto_update"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		Error(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if len(req.HostIds) == 0 {
+		Error(w, http.StatusBadRequest, "At least one host ID is required")
+		return
+	}
+	n, err := h.hosts.UpdateAutoUpdateMany(r.Context(), req.HostIds, req.AutoUpdate)
+	if err != nil {
+		Error(w, http.StatusInternalServerError, "Failed to update auto-update setting")
+		return
+	}
+	JSON(w, http.StatusOK, map[string]interface{}{
+		"message":      "Auto-update " + map[bool]string{true: "enabled", false: "disabled"}[req.AutoUpdate] + " for " + strconv.FormatInt(n, 10) + " host(s)",
+		"updatedCount": n,
+		"autoUpdate":   req.AutoUpdate,
+	})
+}
+
+// BulkForceAgentUpdate handles POST /hosts/bulk/force-agent-update.
+// Body: { hostIds: [...] }
+// Enqueues one update_agent task per host, bypassing the auto-update flag.
+// Hosts that are not connected are skipped at the queue level (the existing
+// per-host force-update handler already handles that path).
+func (h *HostsHandler) BulkForceAgentUpdate(w http.ResponseWriter, r *http.Request) {
+	if h.queueClient == nil {
+		Error(w, http.StatusServiceUnavailable, "Queue service unavailable")
+		return
+	}
+	var req struct {
+		HostIds []string `json:"hostIds"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		Error(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if len(req.HostIds) == 0 {
+		Error(w, http.StatusBadRequest, "At least one host ID is required")
+		return
+	}
+
+	hostHeader := hostFromRequest(r)
+	queued := 0
+	failures := []map[string]string{}
+	for _, id := range req.HostIds {
+		host, err := h.hosts.GetByID(r.Context(), id)
+		if err != nil || host == nil {
+			failures = append(failures, map[string]string{"hostId": id, "reason": "not_found"})
+			continue
+		}
+		task, err := queue.NewUpdateAgentTask(host.ApiID, hostHeader, true) // bypass_settings=true
+		if err != nil {
+			failures = append(failures, map[string]string{"hostId": id, "reason": "task_create_failed"})
+			continue
+		}
+		if _, err := h.queueClient.Enqueue(task); err != nil {
+			failures = append(failures, map[string]string{"hostId": id, "reason": "enqueue_failed"})
+			continue
+		}
+		queued++
+	}
+	JSON(w, http.StatusOK, map[string]interface{}{
+		"message":  "Agent update queued for " + strconv.Itoa(queued) + " of " + strconv.Itoa(len(req.HostIds)) + " host(s)",
+		"queued":   queued,
+		"failures": failures,
 	})
 }
 

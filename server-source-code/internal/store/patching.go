@@ -15,6 +15,7 @@ import (
 	"github.com/PatchMon/PatchMon/server-source-code/internal/safeconv"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const freeBSDBasePackageName = "freebsd-base"
@@ -227,6 +228,22 @@ type PatchRunsStore struct {
 // Pass DBProvider (e.g. DBResolver) for per-tenant DB in multi-host mode.
 func NewPatchRunsStore(db database.DBProvider) *PatchRunsStore {
 	return &PatchRunsStore{db: db}
+}
+
+// HostIDsWithActiveRuns returns the set of host IDs that currently have a
+// patch run in a non-terminal state. The auto-patch dispatcher uses it to
+// skip hosts that are already queued or mid-run.
+func (s *PatchRunsStore) HostIDsWithActiveRuns(ctx context.Context) (map[string]struct{}, error) {
+	d := s.db.DB(ctx)
+	ids, err := d.Queries.ListHostIDsWithActivePatchRuns(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		out[id] = struct{}{}
+	}
+	return out, nil
 }
 
 // CreateRunOpts holds optional fields for CreateRun.
@@ -1021,6 +1038,55 @@ func (s *PatchPoliciesStore) Update(ctx context.Context, id, name, description, 
 func (s *PatchPoliciesStore) Delete(ctx context.Context, id string) error {
 	d := s.db.DB(ctx)
 	return d.Queries.DeletePatchPolicy(ctx, id)
+}
+
+// SetAutoPatchConfig persists the automated-patching schedule of a policy.
+// Kept separate from Update so the legacy CRUD signature stays stable and
+// callers that don't know about auto-patching can't accidentally clear it.
+func (s *PatchPoliciesStore) SetAutoPatchConfig(ctx context.Context, id string, enabled bool, days, timeOfDay *string, autoReboot bool) error {
+	d := s.db.DB(ctx)
+	return d.Queries.UpdatePatchPolicyAutoPatch(ctx, db.UpdatePatchPolicyAutoPatchParams{
+		ID:               id,
+		AutoPatchEnabled: enabled,
+		AutoPatchDays:    days,
+		AutoPatchTime:    timeOfDay,
+		AutoReboot:       autoReboot,
+	})
+}
+
+// ListAutoPatchEnabled returns policies with auto_patch_enabled = true.
+func (s *PatchPoliciesStore) ListAutoPatchEnabled(ctx context.Context) ([]db.PatchPolicy, error) {
+	d := s.db.DB(ctx)
+	return d.Queries.ListAutoPatchPolicies(ctx)
+}
+
+// ClaimAutoPatchSlot atomically stamps auto_patch_last_run_at = slot and
+// reports whether this caller won the claim. The dispatcher calls it BEFORE
+// enqueueing host runs so a crash mid-dispatch results in a missed slot
+// rather than a double-fire, and the conditional UPDATE makes two dispatchers
+// racing for the same slot (overlapping ticks, multiple replicas) resolve to
+// exactly one winner. At-most-once: an unexpected duplicate patch+reboot is
+// worse than a skipped window.
+func (s *PatchPoliciesStore) ClaimAutoPatchSlot(ctx context.Context, id string, slot time.Time) (bool, error) {
+	d := s.db.DB(ctx)
+	rows, err := d.Queries.ClaimPatchPolicyAutoPatchSlot(ctx, db.ClaimPatchPolicyAutoPatchSlotParams{
+		Slot: pgtype.Timestamp{Time: slot.UTC(), Valid: true},
+		ID:   id,
+	})
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
+}
+
+// ListTargetHostIDs returns every host the policy could apply to: hosts with
+// a direct assignment plus members of assigned groups. Callers must still
+// confirm precedence per host via ResolveEffectivePolicy (a host in an
+// assigned group may have a direct assignment to a different policy) and
+// filter exclusions the same way.
+func (s *PatchPoliciesStore) ListTargetHostIDs(ctx context.Context, policyID string) ([]string, error) {
+	d := s.db.DB(ctx)
+	return d.Queries.ListPatchPolicyTargetHostIDs(ctx, policyID)
 }
 
 // PatchPolicyAssignmentsStore provides patch policy assignment access.
