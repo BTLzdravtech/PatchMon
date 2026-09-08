@@ -236,7 +236,12 @@ func TestForkTrackEmbedded(t *testing.T) {
 			if !strings.HasSuffix(name, ".sql") {
 				continue
 			}
-			ver := name[:strings.Index(name, "_")]
+			sep := strings.Index(name, "_")
+			if sep <= 0 {
+				t.Errorf("%s track: %s is not named NNNNNN_description.{up,down}.sql", tr.name, name)
+				continue
+			}
+			ver := name[:sep]
 			base := strings.TrimSuffix(strings.TrimSuffix(name, ".up.sql"), ".down.sql")
 			if prev, ok := seen[ver]; ok && prev != base {
 				t.Errorf("%s track: version %s used by both %s and %s", tr.name, ver, prev, base)
