@@ -59,6 +59,11 @@ UPDATE hosts SET primary_interface = $1, updated_at = NOW() WHERE id = $2;
 -- name: UpdateHostAutoUpdate :exec
 UPDATE hosts SET auto_update = $1, updated_at = NOW() WHERE id = $2;
 
+-- name: UpdateHostsAutoUpdateMany :execrows
+UPDATE hosts
+SET auto_update = sqlc.arg('auto_update'), updated_at = NOW()
+WHERE id = ANY(sqlc.arg('host_ids')::text[]);
+
 -- name: UpdateHostDownAlerts :exec
 UPDATE hosts SET host_down_alerts_enabled = $1, updated_at = NOW() WHERE id = $2;
 

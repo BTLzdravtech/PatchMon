@@ -989,3 +989,22 @@ func (q *Queries) UpdateHostRebootStatus(ctx context.Context, arg UpdateHostRebo
 	_, err := q.db.Exec(ctx, updateHostRebootStatus, arg.ID, arg.NeedsReboot, arg.RebootReason)
 	return err
 }
+
+const updateHostsAutoUpdateMany = `-- name: UpdateHostsAutoUpdateMany :execrows
+UPDATE hosts
+SET auto_update = $1, updated_at = NOW()
+WHERE id = ANY($2::text[])
+`
+
+type UpdateHostsAutoUpdateManyParams struct {
+	AutoUpdate bool     `json:"auto_update"`
+	HostIds    []string `json:"host_ids"`
+}
+
+func (q *Queries) UpdateHostsAutoUpdateMany(ctx context.Context, arg UpdateHostsAutoUpdateManyParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateHostsAutoUpdateMany, arg.AutoUpdate, arg.HostIds)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}

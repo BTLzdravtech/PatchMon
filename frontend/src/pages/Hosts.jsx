@@ -26,6 +26,7 @@ import {
 	GripVertical,
 	Plus,
 	Power,
+	PowerOff,
 	RefreshCw,
 	RotateCcw,
 	Search,
@@ -832,6 +833,66 @@ const Hosts = () => {
 			);
 		},
 	});
+
+	const bulkAutoUpdateMutation = useMutation({
+		mutationFn: ({ hostIds, autoUpdate }) =>
+			adminHostsAPI
+				.bulkUpdateAutoUpdate(hostIds, autoUpdate)
+				.then((res) => res.data),
+		onSuccess: (data) => {
+			queryClient.invalidateQueries(["hosts"]);
+			setBulkFetchReportMessage({
+				text: data?.message || "Auto-update setting updated",
+				type: "success",
+			});
+			setTimeout(
+				() => setBulkFetchReportMessage({ text: "", type: "success" }),
+				5000,
+			);
+		},
+		onError: (error) => {
+			setBulkFetchReportMessage({
+				text:
+					error.response?.data?.error ||
+					"Failed to update auto-update setting",
+				type: "error",
+			});
+			setTimeout(
+				() => setBulkFetchReportMessage({ text: "", type: "error" }),
+				5000,
+			);
+		},
+	});
+
+	const bulkForceAgentUpdateMutation = useMutation({
+		mutationFn: (hostIds) =>
+			adminHostsAPI.bulkForceAgentUpdate(hostIds).then((res) => res.data),
+		onSuccess: (data) => {
+			queryClient.invalidateQueries(["hosts"]);
+			setBulkFetchReportMessage({
+				text:
+					data?.message ||
+					`Agent update queued for ${data?.queued || 0} host(s)`,
+				type: "success",
+			});
+			setTimeout(
+				() => setBulkFetchReportMessage({ text: "", type: "success" }),
+				5000,
+			);
+		},
+		onError: (error) => {
+			setBulkFetchReportMessage({
+				text:
+					error.response?.data?.error || "Failed to queue agent updates",
+				type: "error",
+			});
+			setTimeout(
+				() => setBulkFetchReportMessage({ text: "", type: "error" }),
+				5000,
+			);
+		},
+	});
+
 
 	const bulkFetchReportMutation = useMutation({
 		mutationFn: (hostIds) =>
@@ -2087,6 +2148,63 @@ const Hosts = () => {
 									</span>
 									<span className="sm:hidden">Reboot</span>
 								</button>
+								{canManageHosts() && (
+									<button
+										type="button"
+										onClick={() =>
+											bulkForceAgentUpdateMutation.mutate(selectedHosts)
+										}
+										disabled={bulkForceAgentUpdateMutation.isPending}
+										className="btn-outline flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 min-h-[44px] text-xs sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+										title="Force-update the patchmon-agent on the selected hosts (bypasses the per-host auto_update flag)"
+									>
+										<RotateCcw
+											className={`h-4 w-4 flex-shrink-0 ${
+												bulkForceAgentUpdateMutation.isPending
+													? "animate-spin"
+													: ""
+											}`}
+										/>
+										<span className="hidden sm:inline">Update Agents</span>
+										<span className="sm:hidden">Update</span>
+									</button>
+								)}
+								{canManageHosts() && (
+									<>
+										<button
+											type="button"
+											onClick={() =>
+												bulkAutoUpdateMutation.mutate({
+													hostIds: selectedHosts,
+													autoUpdate: true,
+												})
+											}
+											disabled={bulkAutoUpdateMutation.isPending}
+											className="btn-outline flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 min-h-[44px] text-xs sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+											title="Enable agent auto-update on the selected hosts"
+										>
+											<Power className="h-4 w-4 flex-shrink-0" />
+											<span className="hidden sm:inline">Auto-update On</span>
+											<span className="sm:hidden">On</span>
+										</button>
+										<button
+											type="button"
+											onClick={() =>
+												bulkAutoUpdateMutation.mutate({
+													hostIds: selectedHosts,
+													autoUpdate: false,
+												})
+											}
+											disabled={bulkAutoUpdateMutation.isPending}
+											className="btn-outline flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 min-h-[44px] text-xs sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+											title="Disable agent auto-update on the selected hosts"
+										>
+											<PowerOff className="h-4 w-4 flex-shrink-0" />
+											<span className="hidden sm:inline">Auto-update Off</span>
+											<span className="sm:hidden">Off</span>
+										</button>
+									</>
+								)}
 								<button
 									type="button"
 									onClick={() => setShowBulkAssignModal(true)}
