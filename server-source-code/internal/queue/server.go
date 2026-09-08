@@ -314,8 +314,11 @@ func NewScheduler(opts asynq.RedisClientOpt, db *database.DB, log *slog.Logger) 
 	// Automated patching: poll every minute for policies whose schedule slot
 	// is due. The handler itself enforces at-most-once-per-slot semantics via
 	// auto_patch_last_run_at, so the tight cadence only buys slot precision.
+	// asynq.Unique keeps one dispatch in flight per minute even when several
+	// server processes each run a scheduler; the slot claim in the handler is
+	// the authoritative guard, this just avoids the redundant work.
 	autoPatchDispatch := asynq.NewTask(TypeAutoPatchDispatch, nil)
-	if _, err := scheduler.Register("* * * * *", autoPatchDispatch, asynq.Queue(QueuePatching), asynq.Retention(time.Hour)); err != nil {
+	if _, err := scheduler.Register("* * * * *", autoPatchDispatch, asynq.Queue(QueuePatching), asynq.Retention(time.Hour), asynq.Unique(time.Minute)); err != nil {
 		return nil, err
 	}
 

@@ -11,6 +11,31 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const claimPatchPolicyAutoPatchSlot = `-- name: ClaimPatchPolicyAutoPatchSlot :execrows
+UPDATE patch_policies
+SET auto_patch_last_run_at = $1
+WHERE id = $2
+  AND (auto_patch_last_run_at IS NULL OR auto_patch_last_run_at < $1)
+`
+
+type ClaimPatchPolicyAutoPatchSlotParams struct {
+	Slot pgtype.Timestamp `json:"slot"`
+	ID   string           `json:"id"`
+}
+
+// Atomically claims one automated-patching slot. Returns 1 row when this
+// caller won the slot and 0 when another dispatcher already stamped it (or a
+// later one), so concurrent scheduler ticks or replicas cannot double-fire.
+// The slot instant itself is stored (not NOW()) so the app-side comparison in
+// autoPatchDueSlot is not affected by DB/app clock skew.
+func (q *Queries) ClaimPatchPolicyAutoPatchSlot(ctx context.Context, arg ClaimPatchPolicyAutoPatchSlotParams) (int64, error) {
+	result, err := q.db.Exec(ctx, claimPatchPolicyAutoPatchSlot, arg.Slot, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const clearScheduledAt = `-- name: ClearScheduledAt :exec
 UPDATE patch_runs SET scheduled_at = NULL, updated_at = NOW() WHERE id = $1
 `
@@ -584,9 +609,13 @@ func (q *Queries) ListAutoPatchPolicies(ctx context.Context) ([]PatchPolicy, err
 
 const listHostIDsWithActivePatchRuns = `-- name: ListHostIDsWithActivePatchRuns :many
 SELECT DISTINCT host_id FROM patch_runs
-WHERE status IN ('queued', 'running', 'pending_validation', 'pending_approval', 'validated')
+WHERE status IN ('queued', 'running', 'pending_validation')
 `
 
+// Hosts with a run the agent is (or is about to be) executing. 'validated' and
+// 'pending_approval' are deliberately excluded: they wait on a human and can
+// linger indefinitely, which would otherwise exclude the host from automated
+// patching forever.
 func (q *Queries) ListHostIDsWithActivePatchRuns(ctx context.Context) ([]string, error) {
 	rows, err := q.db.Query(ctx, listHostIDsWithActivePatchRuns)
 	if err != nil {
@@ -1881,15 +1910,6 @@ func (q *Queries) MarkValidationApproved(ctx context.Context, arg MarkValidation
 		return 0, err
 	}
 	return result.RowsAffected(), nil
-}
-
-const setPatchPolicyAutoPatchLastRun = `-- name: SetPatchPolicyAutoPatchLastRun :exec
-UPDATE patch_policies SET auto_patch_last_run_at = NOW() WHERE id = $1
-`
-
-func (q *Queries) SetPatchPolicyAutoPatchLastRun(ctx context.Context, id string) error {
-	_, err := q.db.Exec(ctx, setPatchPolicyAutoPatchLastRun, id)
-	return err
 }
 
 const setPatchRunPolicySnapshot = `-- name: SetPatchRunPolicySnapshot :exec

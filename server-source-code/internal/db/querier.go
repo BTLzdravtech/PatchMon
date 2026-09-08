@@ -100,6 +100,12 @@ type Querier interface {
 	// Re-parsing the JSON here is cheap (kilobytes, in-memory) and avoids a
 	// per-row round-trip — the alternative was a SELECT loop in Go.
 	BulkUpsertPackages(ctx context.Context, payload []byte) ([]BulkUpsertPackagesRow, error)
+	// Atomically claims one automated-patching slot. Returns 1 row when this
+	// caller won the slot and 0 when another dispatcher already stamped it (or a
+	// later one), so concurrent scheduler ticks or replicas cannot double-fire.
+	// The slot instant itself is stored (not NOW()) so the app-side comparison in
+	// autoPatchDueSlot is not affected by DB/app clock skew.
+	ClaimPatchPolicyAutoPatchSlot(ctx context.Context, arg ClaimPatchPolicyAutoPatchSlotParams) (int64, error)
 	ClearHostComplianceHashOnEnable(ctx context.Context, arg ClearHostComplianceHashOnEnableParams) error
 	// Force a fresh docker payload on next check-in by NULLing the hash whenever
 	// the operator re-enables docker. If the agent was already streaming docker
@@ -487,6 +493,10 @@ type Querier interface {
 	ListExistingHostApiIDs(ctx context.Context, dollar_1 []string) ([]string, error)
 	ListHostGroups(ctx context.Context) ([]HostGroup, error)
 	ListHostGroupsWithHostCount(ctx context.Context) ([]ListHostGroupsWithHostCountRow, error)
+	// Hosts with a run the agent is (or is about to be) executing. 'validated' and
+	// 'pending_approval' are deliberately excluded: they wait on a human and can
+	// linger indefinitely, which would otherwise exclude the host from automated
+	// patching forever.
 	ListHostIDsWithActivePatchRuns(ctx context.Context) ([]string, error)
 	ListHostOptions(ctx context.Context, arg ListHostOptionsParams) ([]ListHostOptionsRow, error)
 	ListHosts(ctx context.Context) ([]Host, error)
@@ -563,7 +573,6 @@ type Querier interface {
 	RevokeTrustedDeviceByID(ctx context.Context, arg RevokeTrustedDeviceByIDParams) error
 	SetHostAwaitingPostPatchReport(ctx context.Context, arg SetHostAwaitingPostPatchReportParams) error
 	SetNewsletterSubscribed(ctx context.Context, id string) error
-	SetPatchPolicyAutoPatchLastRun(ctx context.Context, id string) error
 	SetPatchRunPolicySnapshot(ctx context.Context, arg SetPatchRunPolicySnapshotParams) error
 	ToggleHostRepository(ctx context.Context, arg ToggleHostRepositoryParams) error
 	TouchTrustedDeviceLastUsed(ctx context.Context, arg TouchTrustedDeviceLastUsedParams) error

@@ -145,6 +145,13 @@ type RunPatchPayload struct {
 	// the host still flags a pending reboot. Set by policy-driven automatic
 	// runs (patch_policies.auto_reboot); manual runs leave it false.
 	RebootIfRequired bool `json:"reboot_if_required,omitempty"`
+	// NotAfter bounds how long an offline host may keep this run queued. When
+	// set and the agent is still disconnected past this instant, the run is
+	// cancelled instead of re-queued. Policy-driven automatic runs set it to
+	// the end of their window so a host that was down at 03:00 Sunday is not
+	// patched and rebooted when it reconnects on Tuesday morning. Manual runs
+	// leave it nil and keep the historical wait-for-agent behaviour.
+	NotAfter *time.Time `json:"not_after,omitempty"`
 }
 
 // NewRunPatchTask creates a run_patch task.
@@ -803,6 +810,17 @@ func (h *RunPatchHandler) ProcessTask(ctx context.Context, t *asynq.Task) error 
 		// If status has changed (e.g. cancelled, completed), don't re-queue.
 		if run.Status != status && run.Status != "queued" && run.Status != "pending_validation" {
 			h.log.Info("run_patch: run status changed, dropping task", "api_id", p.ApiID, "patch_run_id", p.PatchRunID, "status", run.Status)
+			return nil
+		}
+
+		// Bounded runs (automated patching) expire instead of waiting for the
+		// agent indefinitely; see RunPatchPayload.NotAfter.
+		if p.NotAfter != nil && time.Now().After(*p.NotAfter) {
+			msg := "Host was offline for the whole automated patch window; run cancelled"
+			if _, cErr := h.patchRuns.Cancel(ctx, p.PatchRunID, msg); cErr != nil {
+				h.log.Warn("run_patch: expire cancel failed", "api_id", p.ApiID, "patch_run_id", p.PatchRunID, "error", cErr)
+			}
+			h.log.Info("run_patch: agent offline past window, run cancelled", "api_id", p.ApiID, "patch_run_id", p.PatchRunID, "not_after", p.NotAfter.UTC().Format(time.RFC3339))
 			return nil
 		}
 

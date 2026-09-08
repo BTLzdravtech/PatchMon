@@ -93,9 +93,14 @@ func (h *AutoPatchDispatchHandler) ProcessTask(ctx context.Context, _ *asynq.Tas
 
 	// Org timezone: same resolution chain the manual trigger path uses
 	// (TZ/TIMEZONE env, settings row, UTC fallback).
-	tz := "UTC"
+	// A failed settings read still goes through the resolver so the TZ /
+	// TIMEZONE environment overrides apply, matching the manual path.
+	var tz string
 	if settings, sErr := h.db.Queries.GetFirstSettings(ctx); sErr == nil {
 		tz = config.ResolveTimezone(settings.Timezone, nil)
+	} else {
+		h.log.Warn("auto_patch: settings lookup failed; resolving timezone from environment/default", "error", sErr)
+		tz = config.ResolveTimezone(nil, nil)
 	}
 	loc, err := time.LoadLocation(tz)
 	if err != nil {
@@ -109,13 +114,24 @@ func (h *AutoPatchDispatchHandler) ProcessTask(ctx context.Context, _ *asynq.Tas
 		if !due {
 			continue
 		}
-		// Stamp BEFORE enqueueing: a crash mid-dispatch then means a missed
+		// Claim BEFORE enqueueing: a crash mid-dispatch then means a missed
 		// slot, not a double fire. An unexpected duplicate patch (+ reboot)
 		// is worse than a skipped window the operator can re-run manually.
-		if err := h.policies.MarkAutoPatchFired(ctx, p.ID); err != nil {
-			h.log.Error("auto_patch: mark fired failed, skipping policy", "policy", p.Name, "error", err)
+		// The claim is a conditional UPDATE, so a concurrent dispatcher (an
+		// overlapping tick or another replica) loses cleanly.
+		claimed, err := h.policies.ClaimAutoPatchSlot(ctx, p.ID, slot)
+		if err != nil {
+			h.log.Error("auto_patch: slot claim failed, skipping policy", "policy", p.Name, "error", err)
 			continue
 		}
+		if !claimed {
+			h.log.Info("auto_patch: slot already claimed by another dispatcher, skipping", "policy", p.Name, "slot", slot.UTC().Format(time.RFC3339))
+			continue
+		}
+		// Runs for this slot must not outlive the window: a host that is
+		// offline until then gets its run cancelled rather than executed on
+		// reconnect.
+		notAfter := slot.Add(autoPatchFireTolerance)
 
 		if activeHosts == nil {
 			if activeHosts, err = h.patchRuns.HostIDsWithActiveRuns(ctx); err != nil {
@@ -143,14 +159,17 @@ func (h *AutoPatchDispatchHandler) ProcessTask(ctx context.Context, _ *asynq.Tas
 			// assignment to another policy, or a group exclusion, wins).
 			effective, rErr := h.policies.ResolveEffectivePolicy(ctx, host.ID)
 			if rErr != nil || effective == nil || effective.ID != p.ID {
+				h.log.Debug("auto_patch: host skipped", "policy", p.Name, "host_id", host.ID, "reason", "another policy takes precedence or host excluded")
 				skipped++
 				continue
 			}
 			if strings.Contains(strings.ToLower(host.OSType), "windows") {
+				h.log.Debug("auto_patch: host skipped", "policy", p.Name, "host_id", host.ID, "reason", "windows host")
 				skipped++
 				continue
 			}
 			if _, busy := activeHosts[host.ID]; busy {
+				h.log.Debug("auto_patch: host skipped", "policy", p.Name, "host_id", host.ID, "reason", "patch run already queued or running")
 				skipped++
 				continue
 			}
@@ -175,6 +194,7 @@ func (h *AutoPatchDispatchHandler) ProcessTask(ctx context.Context, _ *asynq.Tas
 				PatchRunID:       runID,
 				PatchType:        "patch_all",
 				RebootIfRequired: p.AutoReboot,
+				NotAfter:         &notAfter,
 			})
 			if tErr != nil {
 				h.log.Error("auto_patch: task create failed", "policy", p.Name, "host_id", host.ID, "error", tErr)

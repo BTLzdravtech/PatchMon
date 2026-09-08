@@ -313,8 +313,16 @@ WHERE id = sqlc.arg('id');
 -- name: ListAutoPatchPolicies :many
 SELECT * FROM patch_policies WHERE auto_patch_enabled = true ORDER BY name ASC;
 
--- name: SetPatchPolicyAutoPatchLastRun :exec
-UPDATE patch_policies SET auto_patch_last_run_at = NOW() WHERE id = $1;
+-- name: ClaimPatchPolicyAutoPatchSlot :execrows
+-- Atomically claims one automated-patching slot. Returns 1 row when this
+-- caller won the slot and 0 when another dispatcher already stamped it (or a
+-- later one), so concurrent scheduler ticks or replicas cannot double-fire.
+-- The slot instant itself is stored (not NOW()) so the app-side comparison in
+-- autoPatchDueSlot is not affected by DB/app clock skew.
+UPDATE patch_policies
+SET auto_patch_last_run_at = sqlc.arg('slot')
+WHERE id = sqlc.arg('id')
+  AND (auto_patch_last_run_at IS NULL OR auto_patch_last_run_at < sqlc.arg('slot'));
 
 -- name: ListPatchPolicyTargetHostIDs :many
 SELECT ppa1.target_id AS host_id FROM patch_policy_assignments ppa1
@@ -326,8 +334,12 @@ JOIN patch_policy_assignments ppa2
 WHERE ppa2.patch_policy_id = $1;
 
 -- name: ListHostIDsWithActivePatchRuns :many
+-- Hosts with a run the agent is (or is about to be) executing. 'validated' and
+-- 'pending_approval' are deliberately excluded: they wait on a human and can
+-- linger indefinitely, which would otherwise exclude the host from automated
+-- patching forever.
 SELECT DISTINCT host_id FROM patch_runs
-WHERE status IN ('queued', 'running', 'pending_validation', 'pending_approval', 'validated');
+WHERE status IN ('queued', 'running', 'pending_validation');
 
 -- patch_policy_assignments
 -- name: GetDirectPatchPolicyAssignment :one

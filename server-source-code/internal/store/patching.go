@@ -15,6 +15,7 @@ import (
 	"github.com/PatchMon/PatchMon/server-source-code/internal/safeconv"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const freeBSDBasePackageName = "freebsd-base"
@@ -1059,13 +1060,23 @@ func (s *PatchPoliciesStore) ListAutoPatchEnabled(ctx context.Context) ([]db.Pat
 	return d.Queries.ListAutoPatchPolicies(ctx)
 }
 
-// MarkAutoPatchFired stamps auto_patch_last_run_at = NOW(). The dispatcher
-// calls this BEFORE enqueueing host runs so a crash mid-dispatch results in
-// a missed slot rather than a double-fire (at-most-once semantics — an
-// unexpected duplicate patch+reboot is worse than a skipped window).
-func (s *PatchPoliciesStore) MarkAutoPatchFired(ctx context.Context, id string) error {
+// ClaimAutoPatchSlot atomically stamps auto_patch_last_run_at = slot and
+// reports whether this caller won the claim. The dispatcher calls it BEFORE
+// enqueueing host runs so a crash mid-dispatch results in a missed slot
+// rather than a double-fire, and the conditional UPDATE makes two dispatchers
+// racing for the same slot (overlapping ticks, multiple replicas) resolve to
+// exactly one winner. At-most-once: an unexpected duplicate patch+reboot is
+// worse than a skipped window.
+func (s *PatchPoliciesStore) ClaimAutoPatchSlot(ctx context.Context, id string, slot time.Time) (bool, error) {
 	d := s.db.DB(ctx)
-	return d.Queries.SetPatchPolicyAutoPatchLastRun(ctx, id)
+	rows, err := d.Queries.ClaimPatchPolicyAutoPatchSlot(ctx, db.ClaimPatchPolicyAutoPatchSlotParams{
+		Slot: pgtype.Timestamp{Time: slot.UTC(), Valid: true},
+		ID:   id,
+	})
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
 }
 
 // ListTargetHostIDs returns every host the policy could apply to: hosts with
