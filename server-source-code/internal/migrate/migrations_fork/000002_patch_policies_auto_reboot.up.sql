@@ -1,4 +1,4 @@
--- 000042: reserved column for future policy-level auto_reboot toggle.
+-- fork 000002: reserved column for future policy-level auto_reboot toggle.
 --
 -- The column is added now so the schema is forward-compatible with the
 -- planned policy-driven reboot flow, even though this release ships the

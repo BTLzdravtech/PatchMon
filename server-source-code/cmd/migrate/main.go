@@ -5,6 +5,10 @@
 //	migrate down - rollback last migration
 //	migrate force V - set migration version (e.g. for baselining)
 //
+// Pass -track fork to operate on the fork-only migration set (tracked in
+// schema_migrations_fork) instead of the upstream set. The server runs both at
+// startup, upstream first.
+//
 // Requires DATABASE_URL environment variable.
 package main
 
@@ -19,6 +23,7 @@ import (
 )
 
 func main() {
+	trackName := flag.String("track", "upstream", "migration track to operate on: upstream or fork")
 	flag.Parse()
 	args := flag.Args()
 
@@ -28,7 +33,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	m, err := ourmigrate.Open(dbURL)
+	var m *migrate.Migrate
+	var err error
+	switch *trackName {
+	case "upstream":
+		m, err = ourmigrate.Open(dbURL)
+	case "fork":
+		m, err = ourmigrate.OpenFork(dbURL)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown track %q (want upstream or fork)\n", *trackName)
+		os.Exit(1)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create migrate instance: %v\n", err)
 		os.Exit(1)
@@ -36,7 +51,7 @@ func main() {
 	defer func() { _, _ = m.Close() }()
 
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: migrate [up|down|force VERSION|version]")
+		fmt.Fprintln(os.Stderr, "Usage: migrate [-track upstream|fork] [up|down|force VERSION|version]")
 		os.Exit(1)
 	}
 
@@ -91,7 +106,7 @@ func main() {
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", args[0])
-		fmt.Fprintln(os.Stderr, "Usage: migrate [up|down|force VERSION|version]")
+		fmt.Fprintln(os.Stderr, "Usage: migrate [-track upstream|fork] [up|down|force VERSION|version]")
 		os.Exit(1)
 	}
 }

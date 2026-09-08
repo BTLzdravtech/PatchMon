@@ -1,4 +1,4 @@
--- 000041: change hosts.auto_update default to false.
+-- fork 000001: change hosts.auto_update default to false.
 --
 -- Rationale: agent self-update fires on every server-side trigger when the
 -- per-host flag is true. Newly enrolled hosts inherited true, which meant
