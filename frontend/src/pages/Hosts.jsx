@@ -971,23 +971,44 @@ const Hosts = () => {
 		bulkFetchReportMutation.mutate(selectedHosts);
 	};
 
+	// Selections persist across server-side pages, but `hosts` is only the
+	// current page. Bulk patch and bulk reboot need OS / needs_reboot for every
+	// selected host, so fetch the selected set explicitly (the dashboard hosts
+	// endpoint supports filter=selected for exactly this). Until it arrives,
+	// fall back to whatever is on the current page.
+	const { data: selectedHostDetails } = useQuery({
+		queryKey: ["hosts", "selected-details", selectedHosts],
+		queryFn: () =>
+			dashboardAPI
+				.getHosts({ filter: "selected", selected: selectedHosts.join(",") })
+				.then((res) =>
+					Array.isArray(res.data) ? res.data : res.data?.items || [],
+				),
+		enabled: selectedHosts.length > 0,
+		placeholderData: keepPreviousData,
+	});
+	const selectedHostRecords = useMemo(() => {
+		if (selectedHosts.length === 0) return [];
+		const source =
+			selectedHostDetails && selectedHostDetails.length > 0
+				? selectedHostDetails
+				: hosts || [];
+		return source.filter((h) => selectedHostsSet.has(h.id));
+	}, [selectedHostDetails, hosts, selectedHosts, selectedHostsSet]);
+
 	// Hosts the bulk patch flow can actually target. Windows hosts are excluded
 	// because the agent does not patch them; the wizard would also drop them,
 	// but we filter here so the button reflects reality before opening it.
 	const bulkPatchablePresetHosts = useMemo(
 		() =>
-			(hosts || [])
-				.filter(
-					(h) =>
-						selectedHosts.includes(h.id) &&
-						!(h.os_type || "").toLowerCase().includes("windows"),
-				)
+			selectedHostRecords
+				.filter((h) => !(h.os_type || "").toLowerCase().includes("windows"))
 				.map((h) => ({
 					id: h.id,
 					friendly_name: h.friendly_name,
 					hostname: h.hostname,
 				})),
-		[hosts, selectedHosts],
+		[selectedHostRecords],
 	);
 	const bulkPatchSkippedCount =
 		selectedHosts.length - bulkPatchablePresetHosts.length;
@@ -995,11 +1016,10 @@ const Hosts = () => {
 	// reboot. Bulk reboot only acts on these — we never reboot a host that
 	// didn't ask for it, even if the operator selected it by accident. The
 	// confirm modal surfaces this filtered count.
-	const selectedRebootCandidates = useMemo(() => {
-		if (!hosts || selectedHosts.length === 0) return [];
-		const selSet = new Set(selectedHosts);
-		return hosts.filter((h) => selSet.has(h.id) && h.needs_reboot === true);
-	}, [hosts, selectedHosts]);
+	const selectedRebootCandidates = useMemo(
+		() => selectedHostRecords.filter((h) => h.needs_reboot === true),
+		[selectedHostRecords],
+	);
 	const selectedRebootSkipped =
 		selectedHosts.length - selectedRebootCandidates.length;
 
@@ -2123,28 +2143,30 @@ const Hosts = () => {
 										<span className="sm:hidden">Patch</span>
 									</button>
 								)}
-								<button
-									type="button"
-									onClick={() => setShowBulkRebootModal(true)}
-									disabled={selectedRebootCandidates.length === 0}
-									className="btn-outline flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 min-h-[44px] text-xs sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-									title={
-										selectedRebootCandidates.length === 0
-											? "No selected hosts are flagged as needing a reboot"
-											: selectedRebootSkipped > 0
-												? `Reboot ${selectedRebootCandidates.length} host${selectedRebootCandidates.length !== 1 ? "s" : ""} that need it (${selectedRebootSkipped} skipped — not flagged)`
-												: `Reboot ${selectedRebootCandidates.length} host${selectedRebootCandidates.length !== 1 ? "s" : ""} that need it`
-									}
-								>
-									<Power className="h-4 w-4 flex-shrink-0" />
-									<span className="hidden sm:inline">
-										Reboot
-										{selectedRebootCandidates.length > 0
-											? ` (${selectedRebootCandidates.length})`
-											: ""}
-									</span>
-									<span className="sm:hidden">Reboot</span>
-								</button>
+								{canManageHosts() && (
+									<button
+										type="button"
+										onClick={() => setShowBulkRebootModal(true)}
+										disabled={selectedRebootCandidates.length === 0}
+										className="btn-outline flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 min-h-[44px] text-xs sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+										title={
+											selectedRebootCandidates.length === 0
+												? "No selected hosts are flagged as needing a reboot"
+												: selectedRebootSkipped > 0
+													? `Reboot ${selectedRebootCandidates.length} host${selectedRebootCandidates.length !== 1 ? "s" : ""} that need it (${selectedRebootSkipped} skipped — not flagged)`
+													: `Reboot ${selectedRebootCandidates.length} host${selectedRebootCandidates.length !== 1 ? "s" : ""} that need it`
+										}
+									>
+										<Power className="h-4 w-4 flex-shrink-0" />
+										<span className="hidden sm:inline">
+											Reboot
+											{selectedRebootCandidates.length > 0
+												? ` (${selectedRebootCandidates.length})`
+												: ""}
+										</span>
+										<span className="sm:hidden">Reboot</span>
+									</button>
+								)}
 								{canManageHosts() && (
 									<button
 										type="button"
