@@ -2,6 +2,7 @@
 package system
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"patchmon-agent/internal/logutil"
 	"patchmon-agent/internal/winexec"
@@ -545,8 +547,8 @@ func (d *Detector) ExecuteReboot(delayMinutes int, reason string) error {
 			comment = comment[:500]
 		}
 		cmd := exec.Command("shutdown", "/r", "/t", strconv.Itoa(delayMinutes*60), "/c", comment)
-		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("shutdown /r failed to start: %w", err)
+		if err := runShutdownCommand(cmd, "shutdown /r"); err != nil {
+			return err
 		}
 		d.logger.WithField("delay_minutes", delayMinutes).WithField("reason", logutil.Sanitize(reason)).Info("Reboot scheduled via shutdown /r")
 		return nil
@@ -558,9 +560,53 @@ func (d *Detector) ExecuteReboot(delayMinutes int, reason string) error {
 		timeArg = "now"
 	}
 	cmd := exec.Command("shutdown", "-r", timeArg, reason)
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("shutdown -r %s failed to start: %w", timeArg, err)
+	if err := runShutdownCommand(cmd, "shutdown -r "+timeArg); err != nil {
+		return err
 	}
 	d.logger.WithField("delay_minutes", delayMinutes).WithField("reason", logutil.Sanitize(reason)).Info("Reboot scheduled via shutdown -r")
 	return nil
+}
+
+// shutdownExitWait bounds how long ExecuteReboot waits for shutdown to
+// return. systemd, BSD and Windows shutdown all return as soon as the reboot
+// is scheduled, so a command still running after this long is treated as
+// scheduled rather than failed (some legacy implementations stay in the
+// foreground until the deadline).
+const shutdownExitWait = 15 * time.Second
+
+// runShutdownCommand starts cmd and waits for it so a non-zero exit is
+// reported instead of swallowed. Previously only Start() was checked, which
+// meant molly-guard aborting on a missing hostname confirmation, a permission
+// denial, or "shutdown: already running" all looked like success: the agent
+// logged "scheduled", the server marked the job complete, and the host never
+// rebooted. stdin is /dev/null so interactive guards fail fast rather than
+// hang.
+func runShutdownCommand(cmd *exec.Cmd, desc string) error {
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("%s failed to start: %w", desc, err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			msg := strings.TrimSpace(out.String())
+			if len(msg) > 500 {
+				msg = msg[:500]
+			}
+			if msg != "" {
+				return fmt.Errorf("%s failed: %w: %s", desc, err, msg)
+			}
+			return fmt.Errorf("%s failed: %w", desc, err)
+		}
+		return nil
+	case <-time.After(shutdownExitWait):
+		// Still running: reap it in the background so it does not linger as a
+		// zombie, and treat the reboot as scheduled.
+		go func() { <-done }()
+		return nil
+	}
 }
