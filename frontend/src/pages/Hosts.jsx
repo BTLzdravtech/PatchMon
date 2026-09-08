@@ -811,7 +811,7 @@ const Hosts = () => {
 				.bulkRebootHosts(hostIds, { delayMinutes: 1 })
 				.then((res) => res.data),
 		onSuccess: (data) => {
-			queryClient.invalidateQueries(["hosts"]);
+			queryClient.invalidateQueries({ queryKey: ["hosts"] });
 			setShowBulkRebootModal(false);
 			setBulkFetchReportMessage({
 				text: data?.message || `Reboot queued for ${data?.queued || 0} host(s)`,
@@ -840,7 +840,7 @@ const Hosts = () => {
 				.bulkUpdateAutoUpdate(hostIds, autoUpdate)
 				.then((res) => res.data),
 		onSuccess: (data) => {
-			queryClient.invalidateQueries(["hosts"]);
+			queryClient.invalidateQueries({ queryKey: ["hosts"] });
 			setBulkFetchReportMessage({
 				text: data?.message || "Auto-update setting updated",
 				type: "success",
@@ -853,8 +853,7 @@ const Hosts = () => {
 		onError: (error) => {
 			setBulkFetchReportMessage({
 				text:
-					error.response?.data?.error ||
-					"Failed to update auto-update setting",
+					error.response?.data?.error || "Failed to update auto-update setting",
 				type: "error",
 			});
 			setTimeout(
@@ -868,7 +867,7 @@ const Hosts = () => {
 		mutationFn: (hostIds) =>
 			adminHostsAPI.bulkForceAgentUpdate(hostIds).then((res) => res.data),
 		onSuccess: (data) => {
-			queryClient.invalidateQueries(["hosts"]);
+			queryClient.invalidateQueries({ queryKey: ["hosts"] });
 			setBulkFetchReportMessage({
 				text:
 					data?.message ||
@@ -882,8 +881,7 @@ const Hosts = () => {
 		},
 		onError: (error) => {
 			setBulkFetchReportMessage({
-				text:
-					error.response?.data?.error || "Failed to queue agent updates",
+				text: error.response?.data?.error || "Failed to queue agent updates",
 				type: "error",
 			});
 			setTimeout(
@@ -892,7 +890,6 @@ const Hosts = () => {
 			);
 		},
 	});
-
 
 	const bulkFetchReportMutation = useMutation({
 		mutationFn: (hostIds) =>
