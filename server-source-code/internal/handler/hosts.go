@@ -685,6 +685,10 @@ func (h *HostsHandler) RebootHost(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		DelayMinutes *int   `json:"delay_minutes"`
 		Reason       string `json:"reason"`
+		// Force reboots a host that is not flagged needs_reboot. Without it
+		// the server enforces the same rule the UI promises: only hosts that
+		// asked for a reboot get one.
+		Force bool `json:"force"`
 	}
 	_ = decodeJSON(r, &body) // body is optional
 	delay := 1
@@ -704,6 +708,10 @@ func (h *HostsHandler) RebootHost(w http.ResponseWriter, r *http.Request) {
 	host, err := h.hosts.GetByID(r.Context(), hostID)
 	if err != nil || host == nil {
 		Error(w, http.StatusNotFound, "Host not found")
+		return
+	}
+	if !body.Force && !hostNeedsReboot(host) {
+		Error(w, http.StatusConflict, "Host is not flagged as needing a reboot (pass force=true to reboot anyway)")
 		return
 	}
 	task, err := queue.NewRebootHostTask(host.ApiID, hostFromRequest(r), delay, reason)
@@ -740,6 +748,8 @@ func (h *HostsHandler) BulkRebootHosts(w http.ResponseWriter, r *http.Request) {
 		HostIds      []string `json:"hostIds"`
 		DelayMinutes *int     `json:"delay_minutes"`
 		Reason       string   `json:"reason"`
+		// Force skips the needs_reboot check; see RebootHost.
+		Force bool `json:"force"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		Error(w, http.StatusBadRequest, "Invalid request body")
@@ -773,6 +783,12 @@ func (h *HostsHandler) BulkRebootHosts(w http.ResponseWriter, r *http.Request) {
 			failures = append(failures, map[string]string{"hostId": id, "reason": "not_found"})
 			continue
 		}
+		if !body.Force && !hostNeedsReboot(host) {
+			// Enforced server-side because the client's list can be stale: the
+			// agent may have cleared the flag after the page loaded.
+			failures = append(failures, map[string]string{"hostId": id, "reason": "not_flagged"})
+			continue
+		}
 		task, err := queue.NewRebootHostTask(host.ApiID, hostHeader, delay, reason)
 		if err != nil {
 			failures = append(failures, map[string]string{"hostId": id, "reason": "task_create_failed"})
@@ -790,6 +806,11 @@ func (h *HostsHandler) BulkRebootHosts(w http.ResponseWriter, r *http.Request) {
 		"delayMinutes": delay,
 		"failures":     failures,
 	})
+}
+
+// hostNeedsReboot reports whether the agent has flagged a pending reboot.
+func hostNeedsReboot(h *models.Host) bool {
+	return h != nil && h.NeedsReboot != nil && *h.NeedsReboot
 }
 
 // BulkUpdateAutoUpdate handles PATCH /hosts/bulk/auto-update.

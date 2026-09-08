@@ -1299,11 +1299,15 @@ func (h *PatchingHandler) UpdatePolicy(w http.ResponseWriter, r *http.Request) {
 		// Timezone is accepted for backward compatibility but ignored — see
 		// CreatePolicy. The DB column is overwritten with NULL on every
 		// update so the column eventually drains across the fleet.
-		Timezone         *string `json:"timezone"`
-		AutoPatchEnabled bool    `json:"auto_patch_enabled"`
+		Timezone *string `json:"timezone"`
+		// Automation fields are pointers so a client that does not know about
+		// automated patching (scripts, older tooling) leaves the existing
+		// schedule alone instead of silently disabling it. Only keys that are
+		// present are applied; the rest keep their stored values.
+		AutoPatchEnabled *bool   `json:"auto_patch_enabled"`
 		AutoPatchDays    *string `json:"auto_patch_days"`
 		AutoPatchTime    *string `json:"auto_patch_time"`
-		AutoReboot       bool    `json:"auto_reboot"`
+		AutoReboot       *bool   `json:"auto_reboot"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		JSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
@@ -1313,7 +1317,28 @@ func (h *PatchingHandler) UpdatePolicy(w http.ResponseWriter, r *http.Request) {
 		JSON(w, http.StatusBadRequest, map[string]string{"error": msg})
 		return
 	}
-	if msg := validateAutoPatchInput(body.AutoPatchEnabled, body.AutoPatchDays, body.AutoPatchTime); msg != "" {
+	existing, err := h.patchPolicies.GetByID(r.Context(), id)
+	if err != nil || existing == nil {
+		JSON(w, http.StatusNotFound, map[string]string{"error": "Policy not found"})
+		return
+	}
+	autoEnabled := existing.AutoPatchEnabled
+	autoDays := existing.AutoPatchDays
+	autoTime := existing.AutoPatchTime
+	autoReboot := existing.AutoReboot
+	if body.AutoPatchEnabled != nil {
+		autoEnabled = *body.AutoPatchEnabled
+	}
+	if body.AutoPatchDays != nil {
+		autoDays = body.AutoPatchDays
+	}
+	if body.AutoPatchTime != nil {
+		autoTime = body.AutoPatchTime
+	}
+	if body.AutoReboot != nil {
+		autoReboot = *body.AutoReboot
+	}
+	if msg := validateAutoPatchInput(autoEnabled, autoDays, autoTime); msg != "" {
 		JSON(w, http.StatusBadRequest, map[string]string{"error": msg})
 		return
 	}
@@ -1327,7 +1352,7 @@ func (h *PatchingHandler) UpdatePolicy(w http.ResponseWriter, r *http.Request) {
 		JSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to update policy"})
 		return
 	}
-	if err := h.patchPolicies.SetAutoPatchConfig(r.Context(), id, body.AutoPatchEnabled, body.AutoPatchDays, body.AutoPatchTime, body.AutoReboot); err != nil {
+	if err := h.patchPolicies.SetAutoPatchConfig(r.Context(), id, autoEnabled, autoDays, autoTime, autoReboot); err != nil {
 		h.log.Error("patching: set auto-patch config error", "policy_id", id, "error", err)
 		JSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to save automated patching settings"})
 		return
@@ -1341,10 +1366,10 @@ func (h *PatchingHandler) UpdatePolicy(w http.ResponseWriter, r *http.Request) {
 		"delay_minutes":      body.DelayMinutes,
 		"fixed_time_utc":     body.FixedTimeUtc,
 		"timezone":           nil,
-		"auto_patch_enabled": body.AutoPatchEnabled,
-		"auto_patch_days":    body.AutoPatchDays,
-		"auto_patch_time":    body.AutoPatchTime,
-		"auto_reboot":        body.AutoReboot,
+		"auto_patch_enabled": autoEnabled,
+		"auto_patch_days":    autoDays,
+		"auto_patch_time":    autoTime,
+		"auto_reboot":        autoReboot,
 	}
 	if policy != nil {
 		resp["created_at"] = pgTimeToISO(policy.CreatedAt)
