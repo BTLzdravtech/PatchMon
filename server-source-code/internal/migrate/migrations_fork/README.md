@@ -13,6 +13,11 @@ database already past that number).
 
 Rules for files here:
 
+- **Never renumber, delete, or edit a migration once any environment has run
+  it.** golang-migrate only stores the highest applied version; if that file
+  disappears the server refuses to start ("no migration found for version N").
+  To undo something, add a new migration that reverses it.
+
 - Number from `000001` upwards, independently of upstream.
 - Write them idempotent (`IF NOT EXISTS`, `IF EXISTS`) so that an upstream
   migration later adding the same object can be reconciled with a one-line
