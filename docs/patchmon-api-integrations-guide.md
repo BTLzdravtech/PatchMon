@@ -1,11 +1,11 @@
 ---
 title: "PatchMon API & Integrations Guide"
-description: "Discord, gethomepage, Ansible, Proxmox auto-enrollment, plus the Auto-Enrollment and Integration REST APIs with an embedded OpenAPI browser."
+description: "Discord, gethomepage, Ansible, Proxmox auto-enrollment, Microsoft Intune, plus the Auto-Enrollment and Integration REST APIs with an embedded OpenAPI browser."
 ---
 
 # PatchMon API & Integrations Guide
 
-This guide covers PatchMon's third-party integrations (Discord, gethomepage, Ansible, Proxmox LXC auto-enrollment) and the REST APIs exposed by the server (Auto-Enrollment API, Integration API). A live, interactive API browser rendered from the server's OpenAPI spec is embedded in the published version of this book on patchmon.net/docs.
+This guide covers PatchMon's third-party integrations (Discord, gethomepage, Ansible, Proxmox LXC auto-enrollment, Microsoft Intune) and the REST APIs exposed by the server (Auto-Enrollment API, Integration API). A live, interactive API browser rendered from the server's OpenAPI spec is embedded in the published version of this book on patchmon.net/docs.
 
 ## Table of Contents
 
@@ -13,8 +13,9 @@ This guide covers PatchMon's third-party integrations (Discord, gethomepage, Ans
 - [Chapter 2: gethomepage Dashboard Card](#gethomepage-dashboard-card)
 - [Chapter 3: Ansible Dynamic Inventory](#ansible-dynamic-inventory)
 - [Chapter 4: Proxmox LXC Auto-Enrollment Guide](#proxmox-lxc-auto-enrollment-guide)
-- [Chapter 5: Auto-Enrollment API Documentation](#auto-enrolment-api-docs)
-- [Chapter 6: Integration API Documentation](#integration-api-documentation)
+- [Chapter 5: Deploying the Windows Agent with Microsoft Intune](#deploying-the-windows-agent-with-microsoft-intune)
+- [Chapter 6: Auto-Enrollment API Documentation](#auto-enrolment-api-docs)
+- [Chapter 7: Integration API Documentation](#integration-api-documentation)
 
 ---
 
@@ -1246,7 +1247,7 @@ PatchMon's Proxmox Auto-Enrollment feature enables you to automatically discover
 #### What It Does
 
 - **Automatically discovers** running LXC containers on Proxmox hosts
-- **Bulk enrolls** containers into PatchMon without manual intervention  
+- **Enrolls** containers into PatchMon without manual intervention  
 - **Installs agents** inside each container automatically
 - **Assigns to host groups** based on token configuration
 - **Tracks enrollment** with full audit logging
@@ -1318,14 +1319,51 @@ PatchMon's Proxmox Auto-Enrollment feature enables you to automatically discover
 
 3. **For each container**, the script:
    - Gathers hostname, IP address, OS information, machine ID
-   - Calls PatchMon API to create host entry
-   - Receives unique `api_id` and `api_key` for that container
+   - Skips the container if its agent is already installed and can reach PatchMon
+   - Reuses the container's existing credentials if they still work (see [Running the Script Again](#running-the-script-again))
+   - Otherwise calls PatchMon API to create host entry, sending the container's `host_id` if it has one. If the machine ID and name are already enrolled, the container is skipped and must be removed in PatchMon before it can be enrolled again
+   - Receives unique `api_id` and `api_key` for that container, and writes a minimal `/etc/patchmon/config.yml` holding the new host's `host_id` if the container has none yet
    - Uses `pct exec` to enter the container
    - Installs curl if missing
    - Downloads and runs PatchMon agent installer
    - Agent authenticates with container-specific credentials
 
 4. **Containers appear in PatchMon** with full patch tracking enabled
+
+#### Running the Script Again
+
+The script is safe to rerun, by hand or from cron. From PatchMon 2.1.4 (script version 2.2.0), a rerun repairs a broken agent on the host it already has, instead of creating a second host. For each container:
+
+| Container state | What the script does |
+|-----------------|----------------------|
+| Agent installed and `patchmon-agent ping` succeeds | Skips it |
+| Credentials present in `/etc/patchmon/credentials.yml` (or its newest backup), the container's `config.yml` points at the same PatchMon URL, and PatchMon still accepts them | Reinstalls the agent with those credentials. No enrolment call is made and no host is created |
+| Credentials rejected by PatchMon (HTTP 401) | Enrols, sending the `host_id` from `/etc/patchmon/config.yml` (or its newest backup) if there is one |
+| Configuration points at a different PatchMon URL | Does not send the old credentials or `host_id` to this server, and enrols as if the container were new. If the URL changed but the server is the same (a new domain, or HTTP to HTTPS), the enrolment usually answers `409` and the container is skipped: repair it with the install command from its host page instead |
+| Credentials could not be checked (network error, server error) | Fails the container for this run and does **not** enrol, so a temporary fault cannot create a duplicate. The next run retries |
+| No credentials | Enrols, sending `host_id` if there is one |
+
+When the script enrols with a `host_id`, PatchMon answers in one of these ways:
+
+| Response | Meaning | Script outcome |
+|----------|---------|----------------|
+| `200`, `reenrolled: true` | The host exists, has never reported or connected, was created by this same token, and was enrolled with the same machine ID (typically an earlier run whose install failed part-way). PatchMon issues a new API key for it | Installs the agent with the new credentials; same host record |
+| `201` | No host with that ID exists; a new host is created | Installs as for any new host |
+| `409`, code `host_reporting` | The host has already reported. PatchMon never re-keys such a host from enrolment. Usually a cloned container, or credentials regenerated in PatchMon but not applied | Skipped with a warning |
+| `409`, code `host_not_reenrollable` | The host was added another way (for example in the UI), by a different token, or before PatchMon 2.1.4 | Skipped with a warning; use the install command on the host's page |
+| `429`, code `reenrol_cooldown` | Credentials for this host were re-issued less than 60 seconds ago | Fails the container for this run; the next run retries |
+
+The token's daily host limit applies only when a host is created. Repairs and re-issues do not count towards it.
+
+**Saved copies of the script.** Containers enrolled by an older copy of the script, and copies saved to disk for cron, keep the old behaviour until you download the script again. Re-download any saved copy (see [Scheduled Enrollment (Cron)](#scheduled-enrollment-cron)) to get this behaviour. An updated script still works against an older PatchMon server: credential reuse works, and the server ignores `host_id`.
+
+**Splitting a cloned container.** If a container was cloned from one that already had the agent, both carry the same credentials and report as one host. Set `FORCE_NEW_HOST` to the clone's VMID (or a comma-separated list of VMIDs) to enrol it as a new host, even though its agent still works:
+
+```bash
+FORCE_NEW_HOST=105 ./proxmox_auto_enroll.sh
+```
+
+For each listed container the script first moves the container's `config.yml`, `credentials.yml` and their backups into `/etc/patchmon/pre-force-new-<timestamp>/`, so neither this run nor a later one reuses them, then enrols and installs as for a new container. If no new host is created (for example PatchMon answers `409 machine_id_match` because the clone kept the original's `/etc/machine-id` and hostname), the files are put back and the container is reported, not left unconfigured; give it its own `/etc/machine-id` or a `HOST_PREFIX` and rerun. Once the split works, the `pre-force-new-*` directory only holds the old host's credentials and can be deleted. `FORCE_NEW_HOST=true` does this for every running container the run reaches, so only use it when every container should become a new host.
 
 #### Two-Tier Security Model
 
@@ -1528,6 +1566,8 @@ Monitor the output:
 - Yellow `[WARN]` = Container skipped (already enrolled or stopped)
 - Red `[ERROR]` = Failure (check troubleshooting section)
 
+The script carries on past a failed container. It finishes with a summary showing `Successfully Enrolled`, `Skipped` and `Failed` counts, and exits non-zero if any container failed. If a container fails because of an interrupted dpkg, the script offers to fix it and retry; the prompt works when the script is piped through `bash` and defaults to no when no terminal is available.
+
 #### Step 5: Verify in PatchMon
 
 1. **Go to Hosts page** in PatchMon UI
@@ -1621,6 +1661,9 @@ AUTO_ENROLLMENT_SECRET=your_secret_here
 # FORCE_INSTALL=false
 # CURL_FLAGS=-sk
 
+# Save the script to disk again after upgrading PatchMon, so this copy
+# gets the newer rerun behaviour.
+
 # === Schedule ===
 # Run daily at 2 AM
 0 2 * * * /root/proxmox_auto_enroll.sh >> /var/log/patchmon-enroll.log 2>&1
@@ -1698,7 +1741,7 @@ grep patchmon /var/log/syslog | tail -n 20
 tail -f /var/log/patchmon-enroll.log
 ```
 
-Already-enrolled containers are automatically skipped on each run, so there is no risk of duplicates or errors from repeated execution.
+Already-enrolled containers are automatically skipped on each run. Containers whose agent is broken are repaired on the host they already have (see [Running the Script Again](#running-the-script-again)), so repeated runs do not create duplicates. Download the script again after upgrading PatchMon so the saved copy picks up changes to this behaviour.
 
 #### Multi-Environment Setup
 
@@ -1732,6 +1775,7 @@ All configuration can be set via environment variables:
 | `DRY_RUN` | `false` | Preview mode (no changes) | `true`/`false` |
 | `HOST_PREFIX` | `""` | Prefix for host names | `proxmox-`, `prod-`, etc. |
 | `FORCE_INSTALL` | `false` | Bypass broken packages | `true`/`false` |
+| `FORCE_NEW_HOST` | `false` | Enrol containers as new hosts even if their agent works, after moving their old configuration and credentials into `/etc/patchmon/pre-force-new-<timestamp>/` (for splitting clones) | `true` (every container), or VMIDs such as `105` or `105,106` |
 | `DEBUG` | `false` | Enable debug logging | `true`/`false` |
 
 #### Script Configuration Section
@@ -1747,6 +1791,7 @@ CURL_FLAGS="${CURL_FLAGS:--s}"
 DRY_RUN="${DRY_RUN:-false}"
 HOST_PREFIX="${HOST_PREFIX:-}"
 FORCE_INSTALL="${FORCE_INSTALL:-false}"
+FORCE_NEW_HOST="${FORCE_NEW_HOST:-false}"
 ```
 
 #### Token Configuration (PatchMon UI)
@@ -1926,12 +1971,12 @@ Response: {"error":"Invalid token secret"}
 
 **Symptom:**
 ```
-[ERROR] Rate limit exceeded - maximum hosts per day reached
+[ERROR]   ✗ PatchMon asked to retry later (HTTP 429) for container-name
 ```
 
-**Cause:** Token's `max_hosts_per_day` limit reached
+**Cause:** Token's `max_hosts_per_day` limit reached, or (code `reenrol_cooldown` in the response) credentials for that container's host were re-issued less than 60 seconds ago. The cooldown clears on its own; the next run retries.
 
-**Solution:**
+**Solution for the daily limit:**
 ```bash
 # Option 1: Wait until tomorrow (limit resets at midnight)
 date
@@ -2068,6 +2113,30 @@ If you need to re-enroll:
 1. Delete host from PatchMon UI (Hosts page)
 2. Remove agent config inside the container: `pct exec <vmid> -- rm -rf /etc/patchmon/`
 3. Rerun enrollment script
+
+##### Warning: Container Already Reporting
+
+**Symptom:**
+```
+[WARN]   ⊘ container-name is already reporting to PatchMon as container-name; skipping
+```
+
+**Cause:** The container's agent cannot reach PatchMon with its credentials, but the host its `host_id` names has already reported (enrolment returned `409` with code `host_reporting`). PatchMon never issues new credentials for a host that has reported. This is usually a cloned container, or credentials regenerated in PatchMon but not applied to the container.
+
+**Solution:**
+- If the container is a clone of another enrolled container, rerun with `FORCE_NEW_HOST=<its VMID>` to enrol it as its own host (see [Running the Script Again](#running-the-script-again)).
+- If credentials were regenerated in PatchMon, reinstall the agent in the container with the install command on the host's page.
+
+##### Warning: Container Added Another Way
+
+**Symptom:**
+```
+[WARN]   ⊘ container-name was added to PatchMon another way as container-name; skipping
+```
+
+**Cause:** The container's `host_id` names a host that has never reported but was not created by this token, for example one added in the UI or enrolled before PatchMon 2.1.4 (code `host_not_reenrollable`).
+
+**Solution:** Use the install command on that host's page in PatchMon, or delete that host and rerun the script.
 
 #### Agent Not Reporting
 
@@ -2298,41 +2367,6 @@ resource "null_resource" "patchmon_enrollment" {
 }
 ```
 
-#### Bulk API Enrollment
-
-For very large deployments (100+ containers), use the bulk API endpoint directly:
-
-```bash
-#!/bin/bash
-# bulk_enroll.sh
-
-# Gather all container info
-containers_json=$(pct list | tail -n +2 | while read -r line; do
-  vmid=$(echo "$line" | awk '{print $1}')
-  name=$(echo "$line" | awk '{print $3}')
-  
-  echo "{\"friendly_name\":\"$name\",\"machine_id\":\"proxmox-lxc-$vmid\"}"
-done | jq -s '.')
-
-# Send bulk enrollment request
-curl -X POST \
-  -H "X-Auto-Enrollment-Key: $AUTO_ENROLLMENT_KEY" \
-  -H "X-Auto-Enrollment-Secret: $AUTO_ENROLLMENT_SECRET" \
-  -H "Content-Type: application/json" \
-  -d "{\"hosts\":$containers_json}" \
-  "$PATCHMON_URL/api/v1/auto-enrollment/enroll/bulk"
-```
-
-**Benefits:**
-- Single API call for all containers
-- Faster for 50+ containers
-- Partial success supported (individual failures don't block others)
-
-**Limitations:**
-- Max 50 hosts per request
-- Does not install agents (must be done separately)
-- Less detailed error reporting per host
-
 #### Webhook-Triggered Enrollment
 
 Trigger enrollment from PatchMon webhook (requires custom setup):
@@ -2512,12 +2546,12 @@ curl "https://patchmon.example.com/api/v1/auto-enrollment/script?type=proxmox-lx
 
 **Endpoint:** `POST /api/v1/auto-enrollment/enroll`
 
-**Request:**
+**Request** (`host_id` is optional; the scripts send it when the container already has one):
 ```json
 {
   "friendly_name": "webserver",
   "machine_id": "proxmox-lxc-100-abc123",
-  "auto_update": true,
+  "host_id": "550e8400-e29b-41d4-a716-446655440000",
   "metadata": {
     "vmid": "100",
     "proxmox_node": "proxmox01",
@@ -2526,8 +2560,6 @@ curl "https://patchmon.example.com/api/v1/auto-enrollment/script?type=proxmox-lx
   }
 }
 ```
-
-`auto_update` is optional and controls the per-host agent auto-update flag. When omitted, the host inherits the global agent auto-update setting.
 
 **Response:** `201 Created`
 ```json
@@ -2548,66 +2580,37 @@ curl "https://patchmon.example.com/api/v1/auto-enrollment/script?type=proxmox-lx
 }
 ```
 
+**Response:** `200 OK` when `host_id` names a host this token created that has never reported. Same body as `201`, with `"message": "Host credentials re-issued"`, `"reenrolled": true` and `host.host_group` set to `null`. The host keeps its ID, API ID and host groups; only the API key is new.
+
 **Error Responses:**
 
-> **Note:** The API does not perform duplicate host checks. Duplicate prevention is handled client-side by the enrollment script, which checks for an existing agent configuration inside each container before calling the API.
+`409 Conflict` - Nothing is created and no credentials are issued. The `code` field says why:
 
-`429 Too Many Requests` - Rate limit exceeded:
+| `code` | Cause |
+|--------|-------|
+| `machine_id_match` | No `host_id` was sent, and a host with the same `machine_id` and the same name is already enrolled. Names are compared ignoring case; machine IDs ignoring case and dashes, against both the ID sent at enrolment and the one the agent later reports. Requests that omit `machine_id`, or send one that does not identify a machine (`uninitialized`, all zeros, or a vendor default such as `03000200-0400-0500-0006-000700080009`), are never deduplicated |
+| `host_reporting` | The host named by `host_id` has already reported |
+| `host_not_reenrollable` | The host named by `host_id` was not created by this token |
+
+```json
+{
+  "error": "Host already enrolled",
+  "code": "machine_id_match",
+  "friendly_name": "webserver"
+}
+```
+
+`429 Too Many Requests` - Either the token's daily host limit was reached on a request that would create a host:
 ```json
 {
   "error": "Rate limit exceeded",
-  "message": "Maximum 100 hosts per day allowed for this token"
+  "message": "Maximum hosts per day allowed for this token"
 }
 ```
 
-##### Bulk Enroll Hosts
+or credentials for the host named by `host_id` were re-issued less than 60 seconds ago (`"code": "reenrol_cooldown"`).
 
-**Endpoint:** `POST /api/v1/auto-enrollment/enroll/bulk`
-
-**Request:**
-```json
-{
-  "hosts": [
-    {
-      "friendly_name": "webserver",
-      "machine_id": "proxmox-lxc-100-abc123"
-    },
-    {
-      "friendly_name": "database",
-      "machine_id": "proxmox-lxc-101-def456"
-    }
-  ]
-}
-```
-
-**Limits:**
-- Minimum: 1 host
-- Maximum: 50 hosts per request
-
-**Response:** `201 Created`
-```json
-{
-  "message": "Bulk enrollment completed: 2 succeeded, 0 failed, 0 skipped",
-  "results": {
-    "success": [
-      {
-        "id": "uuid",
-        "friendly_name": "webserver",
-        "api_id": "patchmon_abc123",
-        "api_key": "def456"
-      },
-      {
-        "id": "uuid",
-        "friendly_name": "database",
-        "api_id": "patchmon_ghi789",
-        "api_key": "jkl012"
-      }
-    ],
-    "failed": [],
-    "skipped": []
-  }
-}
-```
+See [Running the Script Again](#running-the-script-again) for how the script handles each response.
 
 ### FAQ
 
@@ -2617,7 +2620,7 @@ curl "https://patchmon.example.com/api/v1/auto-enrollment/script?type=proxmox-lx
 A: Yes, as long as the combined enrollment count stays within `max_hosts_per_day` limit. Rate limits are per-token, not per-host.
 
 **Q: What happens if I run the script multiple times?**  
-A: Already-enrolled containers are automatically skipped. The script checks for existing agent configuration inside each container and skips those where the agent is already installed and responsive. Safe to rerun!
+A: Already-enrolled containers are automatically skipped. The script checks for existing agent configuration inside each container and skips those where the agent is already installed and responsive. Containers with a broken agent are repaired with their existing credentials, or given new credentials for the same host if it never reported. See [Running the Script Again](#running-the-script-again). Safe to rerun!
 
 **Q: Can I enroll stopped LXC containers?**  
 A: No, containers must be running. The script needs to execute commands inside the container to install the agent. Start containers before enrolling.
@@ -2649,7 +2652,7 @@ A: Not currently (would require inbound network access). The script must run on 
 A: Yes, token secrets are hashed using bcrypt before storage. Only the hash is stored in the database, never the plain text.
 
 **Q: What happens if someone steals my auto-enrollment token?**  
-A: They can create new hosts up to the rate limit, but cannot control existing hosts or access host data. Immediately disable the token in PatchMon UI if compromised.
+A: They can create new hosts up to the rate limit, and issue new credentials for hosts created by that same token that have never reported. They cannot take over a host that has reported, control existing hosts, or access host data. Immediately disable the token in PatchMon UI if compromised.
 
 **Q: Can I audit who created which tokens?**  
 A: Yes, each token stores the `created_by_user_id`. View in PatchMon UI or query the database.
@@ -2672,7 +2675,7 @@ A: Ubuntu, Debian, CentOS, RHEL, Rocky Linux, AlmaLinux, Alpine Linux. Any distr
 A: Minimal. The script download is ~15KB, agent installation is ~50-100KB per container. Total: ~1-2MB for 10 containers.
 
 **Q: Can I run enrollment in parallel for faster processing?**  
-A: Not recommended. The script processes containers sequentially to avoid overwhelming the PatchMon server. For 100+ containers, consider the bulk API endpoint.
+A: Not recommended. The script processes containers sequentially to avoid overwhelming the PatchMon server. For large estates, run the script on each Proxmox host in turn.
 
 **Q: Does enrollment restart containers?**  
 A: No, containers remain running. The agent is installed without reboots or service disruptions.
@@ -2731,7 +2734,173 @@ For enterprise support, training, or custom integrations:
 
 ---
 
-## Chapter 5: Auto-Enrollment API Documentation {#auto-enrolment-api-docs}
+## Chapter 5: Deploying the Windows Agent with Microsoft Intune {#deploying-the-windows-agent-with-microsoft-intune}
+
+### Overview
+
+This chapter deploys the PatchMon agent to Windows devices as an Intune **Win32 app**. A single package, built from three scripts kept in the PatchMon repository, enrols every device with one auto-enrolment token, installs the agent and registers the `PatchMonAgent` service. You do not need to create hosts by hand or copy per-host install commands.
+
+The scripts live in [`tools/intune/`](https://github.com/PatchMon/PatchMon/tree/main/tools/intune) on GitHub:
+
+| File | Used as | What it does |
+|------|---------|--------------|
+| `install.ps1` | Win32 app install command | Enrols the device through the [Auto-Enrollment API](#auto-enrolment-api-docs), downloads the server's Windows installer with the new host's credentials, runs it and checks the service is running |
+| `detect.ps1` | Custom detection script | Reports the app as installed when the `PatchMonAgent` service is running |
+| `uninstall.ps1` | Win32 app uninstall command | Downloads and runs the server's Windows removal script |
+
+#### How it Works
+
+1. Intune runs `install.ps1` as SYSTEM. Intune starts Win32 app commands in 32-bit PowerShell, so the script relaunches itself in 64-bit PowerShell first.
+2. The script reads the device's `MachineGuid` and calls `POST /api/v1/auto-enrollment/enroll` with the computer name and that machine ID. PatchMon creates a pending host and returns its `api_id` and `api_key`.
+3. The script fetches `GET /api/v1/hosts/install?os=windows` with those credentials and runs the returned installer, the same one the **Add Host** wizard uses. That installer downloads the agent binary, writes `C:\ProgramData\PatchMon\config.yml` and `credentials.yml`, and creates the `PatchMonAgent` service.
+4. The script exits `0` only when the service is running.
+
+#### Retries
+
+The script tells Intune how to treat a failure through its exit code:
+
+| Exit code | Meaning | What Intune does |
+|-----------|---------|------------------|
+| `0` | The agent is installed and the service is running | Marks the app installed |
+| `1618` | A failure that may clear by itself: a network error, the token's daily limit, a failed download, the installer failing (often Defender), or the service not starting | Retries up to three times, five minutes apart |
+| `1` | PatchMon refused the enrolment (HTTP 400, 401, 403 or 409). Retrying will not help until someone fixes the cause | Marks the install failed and offers it again on its next re-evaluation, roughly every 24 hours |
+
+`1618` is in Intune's default return code list as **Retry**, so you do not need to add it. After its retries run out, Intune treats the install as failed and tries again on the 24-hour cycle.
+
+The script is safe to run again at any point:
+
+- **The service is running:** the script exits `0` straight away. If the service exists but is stopped, the script tries to start it, and reinstalls if it will not start.
+- **The agent already has credentials** (an earlier attempt got as far as writing `credentials.yml`): the script reuses them and does not enrol again.
+- **An earlier attempt enrolled but failed before writing credentials:** the script sends the host ID it saved in `C:\ProgramData\PatchMon\intune-host-id`. Because that host has never reported, PatchMon re-issues its credentials instead of creating a duplicate.
+
+### Before You Start
+
+**Intune**
+
+- Devices are Microsoft Entra joined, hybrid joined or Entra registered, and enrolled in Intune. The Intune Management Extension installs itself when the first Win32 app is assigned.
+- Devices run 64-bit Windows 10 or 11. 32-bit Windows is not supported by the agent.
+- You have the [Microsoft Win32 Content Prep Tool](https://github.com/microsoft/Microsoft-Win32-Content-Prep-Tool) (`IntuneWinAppUtil.exe`).
+
+**PatchMon**
+
+- Devices can reach the PatchMon server over HTTPS.
+- On a self-hosted install, **Settings → Server URL** is set to the address devices will use. The installer writes it into the agent's config.
+- If PatchMon uses a certificate from a private CA, deploy that CA to devices first with an Intune **Trusted certificate** profile. The enrolment call checks the certificate even if **Ignore SSL self-signed** is turned on in PatchMon.
+
+**Microsoft Defender**
+
+The agent binary is not code-signed yet, and real-time protection can quarantine it or lock it while scanning, which fails the install. Before assigning the app, add a Defender exclusion for `C:\Program Files\PatchMon` through **Endpoint security → Antivirus** and assign it to the same devices.
+
+### Step 1: Create an Auto-Enrolment Token
+
+1. In PatchMon, go to **Settings → API integrations**, open the **Auto-Enrollment (Direct)** tab and select **New Token**.
+2. Fill in:
+   - **Token Name:** for example `Intune - Windows`.
+   - **Max Hosts Per Day:** at least the number of devices you expect to enrol in a day. When the limit is reached, further devices retry and then wait for Intune's next cycle.
+   - **Default Host Group (Optional):** a group such as `Windows - Intune`, so new hosts are easy to find.
+   - **Allowed IP Addresses (Optional):** leave empty unless every device reaches PatchMon from known public IPs. Remote and home-working devices are refused otherwise.
+   - **Expiration Date (Optional):** set one if you want the token to stop working after the rollout.
+3. Copy the **Token Key** and **Token Secret**. The secret is shown only once.
+
+### Step 2: Prepare the Scripts
+
+1. Download `install.ps1`, `detect.ps1` and `uninstall.ps1` from [`tools/intune/`](https://github.com/PatchMon/PatchMon/tree/main/tools/intune).
+2. In `install.ps1`, set the three values at the top:
+
+   ```powershell
+   $Server = "https://patchmon.example.com"
+   $Key    = "patchmon_ae_xxxxxxxx"
+   $Secret = "xxxxxxxx"
+   ```
+
+3. In `uninstall.ps1`, set `$Server` to the same URL.
+4. Put `install.ps1` and `uninstall.ps1` in an otherwise empty folder, for example `C:\IntunePackages\PatchMon\source`. Keep `detect.ps1` and the prep tool out of it: everything in the folder is packed into the app.
+
+### Step 3: Build the Package
+
+From the folder that holds `IntuneWinAppUtil.exe`:
+
+```powershell
+.\IntuneWinAppUtil.exe -c C:\IntunePackages\PatchMon\source -s install.ps1 -o C:\IntunePackages\PatchMon\output -q
+```
+
+This writes `install.intunewin` to the output folder.
+
+### Step 4: Create the Win32 App
+
+In the Intune admin center, go to **Apps → All Apps → Create**, choose **Windows app (Win32)** and upload `install.intunewin`. Use these settings:
+
+| Page | Setting | Value |
+|------|---------|-------|
+| App information | Name / Publisher | `PatchMon Agent` / your organisation |
+| Program | Installer type | Command line |
+| Program | Install command | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File install.ps1` |
+| Program | Uninstall command | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File uninstall.ps1` |
+| Program | Installation time required | 30 minutes |
+| Program | Install behaviour | **System** |
+| Program | Device restart behaviour | No specific action |
+| Program | Return codes | Leave the defaults |
+| Requirements | Operating system architecture | x64 and ARM64 |
+| Detection rules | Rules format | Use a custom detection script |
+| Detection rules | Script file | `detect.ps1` |
+| Detection rules | Run script as 32-bit process on 64-bit clients | No |
+| Detection rules | Enforce script signature check | No |
+| Assignments | Required | A device group |
+
+Both scripts switch to 64-bit PowerShell themselves, so the commands can use plain `powershell.exe`.
+
+Detection checks that the service is **running**, not only that it exists. Two things follow from that:
+
+- If someone stops the agent, Intune starts it again (or reinstalls it) at its next evaluation. Exclude a device from the assignment while you work on it.
+- An **Uninstall** assignment skips devices whose agent service is stopped, because Intune sees the app as already gone. Remove the agent from those devices with the removal script described in the Operator Guide.
+
+Assign the app to a small pilot group first, then widen it.
+
+### Step 5: Check the Rollout
+
+- **Intune:** the app's **Device install status** shows each device. Installs normally finish a few minutes after the device next checks in.
+- **PatchMon:** new hosts appear under **Hosts**, named after the computer and placed in the token's default host group. They turn active when the installer's connectivity test reaches the server.
+- **On a device:** `install.ps1` logs every run to `C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\PatchMonInstall.log`, which Intune's **Collect diagnostics** device action also gathers. The agent's own log is `C:\ProgramData\PatchMon\patchmon-agent.log`.
+
+To test the install script on one machine without Intune, run it as SYSTEM with [PsExec](https://learn.microsoft.com/en-us/sysinternals/downloads/psexec) from an elevated prompt, then check the exit code:
+
+```powershell
+psexec -i -s powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\IntunePackages\PatchMon\source\install.ps1
+```
+
+### Uninstalling
+
+Assign the app to a group with the **Uninstall** intent. `uninstall.ps1` stops and removes the service and deletes the agent's program files, configuration, credentials and logs. It downloads the removal script from your PatchMon server, so the server must be reachable when it runs.
+
+The host record stays in PatchMon. Delete it from the host's page once the device has gone. If the same device will get the agent again later, delete the host **before** reassigning the app: otherwise PatchMon recognises the machine and refuses to enrol it a second time.
+
+### Troubleshooting
+
+Every message below is in `PatchMonInstall.log` on the device.
+
+| Message | Cause | Fix |
+|---------|-------|-----|
+| `HTTP 429` with `Rate limit exceeded` | The token's **Max Hosts Per Day** was reached | Raise the limit. Devices retry on their own |
+| `HTTP 401` with `Invalid or inactive token`, `Invalid token secret` or `Token expired` | Wrong key or secret in `install.ps1`, or the token was revoked or has expired | Fix the values, rebuild the package and upload the new `.intunewin` to the same app |
+| `HTTP 403` with `IP address not authorized for this token` | The device's public IP is outside **Allowed IP Addresses** | Widen or clear the allow list |
+| `HTTP 403` with `Host limit reached for this host's package` | Your plan's host allowance is used up | Remove hosts you no longer need, or raise the allowance |
+| `HTTP 409` with `Host already enrolled` | PatchMon already has a host with this machine ID and computer name: the device was uninstalled and reassigned without deleting its host, or it had an earlier manual install | Delete that host in PatchMon. The device enrols on Intune's next cycle |
+| `HTTP 409` with code `host_not_reenrollable` | The device enrolled with a previous token and never finished, then the token was replaced | Delete the pending host in PatchMon. The device enrols as a new host on Intune's next cycle |
+| `HTTP 409` with code `host_reporting` | The saved host ID belongs to a host that has already reported, for example after its credentials were regenerated in PatchMon | Reinstall with the install command on the host's page, or delete the host in PatchMon |
+| `HTTP 0`, or `Installer download failed` with a connection error | The device could not reach the server: DNS, firewall, proxy or an untrusted certificate | Check the device can open `$Server` in a browser, and deploy your CA if it is private |
+| `PatchMon installer exited with 1`, agent binary missing from `C:\Program Files\PatchMon` | Defender quarantined it | Add the exclusion described in [Before You Start](#before-you-start), then let Intune retry |
+| Intune shows the app installed but no host appears in PatchMon | A running agent from an earlier install points at another server, or uses credentials that were deleted in PatchMon | Check `patchmon_server` in `C:\ProgramData\PatchMon\config.yml`. Uninstall the old agent, then let Intune install again |
+| No `PatchMonInstall.log` and the scripts never run | A group policy enforces an `AllSigned` execution policy, which overrides the `Bypass` in the install command | Sign the scripts with a trusted certificate, or exclude these devices from that policy |
+
+### Security Notes
+
+- The token secret is inside the package. Anyone who can download the app from Intune, and SYSTEM on a device while the install runs, can read it. Use a dedicated token for Intune, keep **Max Hosts Per Day** close to your real rollout pace, and revoke or replace the token when the rollout ends. Revoking it does not affect hosts that are already enrolled.
+- A leaked token lets someone add hosts to PatchMon, which can use up your host allowance and block new enrolments. With a pending host's ID and its machine's `MachineGuid` as well, it can re-issue that host's credentials. It gives no access to hosts that are already reporting, or to their credentials.
+- The installer locks `C:\ProgramData\PatchMon` to SYSTEM and Administrators before it writes `credentials.yml`.
+
+---
+
+## Chapter 6: Auto-Enrollment API Documentation {#auto-enrolment-api-docs}
 
 ### Overview
 
@@ -3021,6 +3190,12 @@ curl "https://patchmon.example.com/api/v1/auto-enrollment/script?type=proxmox-lx
 
 **Response:** `200 OK`. Plain text bash script with credentials injected.
 
+Both scripts can be run again on a host that is already enrolled. They skip a host whose agent works, reuse its credentials if PatchMon still accepts them, and otherwise enrol with the host's `host_id` so that a host which never reported gets new credentials rather than a duplicate record. See [Running the Script Again](#running-the-script-again) in the Proxmox chapter; the `direct-host` script behaves the same way for the machine it runs on. On a machine with no usable `/etc/machine-id` or `/var/lib/dbus/machine-id` (most containers), the `direct-host` and install scripts generate a machine ID once and keep it in `/var/lib/patchmon/machine-id`, so every later run sends the same one; the removal script leaves that file in place, as it does `/etc/machine-id`. Existing credentials and `host_id` are only used when the agent's `config.yml` points at the same PatchMon URL the script was downloaded from, so after a change of server URL repair the host with the install command from its host page. To create a new host for this machine even when its agent works (for example on a cloned machine), set `FORCE_NEW_HOST=true`. The script moves `/etc/patchmon/config.yml`, `credentials.yml` and their backups into `/etc/patchmon/pre-force-new-<timestamp>/` first, so they are never reused, and puts them back if no new host is created. If PatchMon answers that a host with this machine ID and name already exists, that host is the original (or one an earlier `FORCE_NEW_HOST` run created for this machine). Do not remove it; rerun with a different `FRIENDLY_NAME`, or give the clone its own `/etc/machine-id` (or, if it has none, delete its copied `/var/lib/patchmon/machine-id`):
+
+```bash
+curl -s "https://patchmon.example.com/api/v1/auto-enrollment/script?type=direct-host&token_key=KEY&token_secret=SECRET" | FORCE_NEW_HOST=true sh
+```
+
 **Errors:**
 - `400 Bad Request`: Missing or invalid `type` parameter
 - `401 Unauthorized`: Missing credentials, invalid/inactive token, invalid secret, or expired token
@@ -3043,6 +3218,7 @@ Content-Type: application/json
 |-------|------|----------|-------------|
 | `friendly_name` | string | Yes | Display name for the host (max 255 chars) |
 | `machine_id` | string | No | Unique machine identifier (max 255 chars) |
+| `host_id` | string | No | The `host_id` from the machine's existing `config.yml`, if it has one (1 to 64 letters, digits or hyphens). Lets PatchMon recognise a machine it has already enrolled. Never used as the ID of a new host. Added in 2.1.4 |
 | `metadata` | object | No | Additional metadata (vmid, proxmox_node, ip_address, os_info, etc.) |
 
 **Example Request:**
@@ -3080,19 +3256,65 @@ Content-Type: application/json
 
 > **Note:** The `api_key` is only returned in this response (plain text). It is hashed before storage. The `host_group` is `null` if no default host group is configured on the token.
 
+**Response:** `200 OK` (credentials re-issued)
+
+Returned when `host_id` names a host that exists, has never reported or connected, was created by this same token, and was enrolled with the same `machine_id` as this request. PatchMon issues a new API key for that host and returns the same body as `201`, with `"message": "Host credentials re-issued"` and `"reenrolled": true`. The host keeps its ID and its API ID; the old key stops working. Nothing new is created, so the token's daily host limit is neither checked nor consumed.
+
+```json
+{
+  "message": "Host credentials re-issued",
+  "host": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "friendly_name": "webserver",
+    "api_id": "patchmon_abc123def456",
+    "api_key": "new-raw-api-key-value",
+    "host_group": null,
+    "status": "pending"
+  },
+  "reenrolled": true
+}
+```
+
+**How `host_id` is resolved:**
+
+| Host named by `host_id` | Result |
+|-------------------------|--------|
+| Not found | Enrolled as a new host (`201`), exactly as if `host_id` were not sent |
+| Has reported, or its agent has connected to PatchMon | `409`, code `host_reporting`. Such a host is never re-keyed by enrolment |
+| Never reported, created by a different token, in the UI, or before 2.1.4 | `409`, code `host_not_reenrollable` |
+| Never reported, created by this token, but enrolled with a different `machine_id` | `409`, code `host_not_reenrollable` |
+| Never reported, created by this token, credentials re-issued less than 60 seconds ago | `429`, code `reenrol_cooldown` |
+| Never reported, created by this token | `200`, credentials re-issued |
+
+Responses from this path carry `code` and `host_id` alongside `error`, plus `friendly_name` when the host was created by this token:
+
+```json
+{
+  "error": "This host is already reporting to PatchMon. If its agent is broken, reinstall it with the install command on the host's page, or regenerate its credentials.",
+  "code": "host_reporting",
+  "friendly_name": "webserver",
+  "host_id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
 **Error Responses:**
 
 | Status | Error | Cause |
 |--------|-------|-------|
 | `400` | Validation errors | Missing or invalid `friendly_name` |
+| `400` | `Invalid host_id` | `host_id` is not 1 to 64 letters, digits or hyphens |
 | `401` | `Auto-enrollment credentials required` | Missing `X-Auto-Enrollment-Key` or `X-Auto-Enrollment-Secret` headers |
 | `401` | `Invalid or inactive token` | Token key not found or token is disabled |
 | `401` | `Invalid token secret` | Secret does not match |
 | `401` | `Token expired` | Token has passed its expiration date |
 | `403` | `IP address not authorized for this token` | Client IP not in `allowed_ip_ranges` |
-| `429` | `Rate limit exceeded` | Token's `max_hosts_per_day` limit reached |
+| `409` | `Host already enrolled` | Code `machine_id_match`. No `host_id` was sent and a host with the same `machine_id` and name already exists; the body also carries that host's `friendly_name` |
+| `409` | (message) | Code `host_reporting` or `host_not_reenrollable`; see the table above |
+| `429` | `Rate limit exceeded` | Token's `max_hosts_per_day` limit reached on a request that would create a host |
+| `429` | (message) | Code `reenrol_cooldown`. Credentials for the host named by `host_id` were re-issued less than 60 seconds ago |
+| `429` | `Too many requests. Try again later.` | Per-IP agent rate limit hit (`AGENT_RATE_LIMIT_MAX` per `AGENT_RATE_LIMIT_WINDOW_MS`, 1000 per minute by default); the body uses a `message` key and a `Retry-After` header is set |
 
-> **Duplicate handling:** The API does not perform server-side duplicate host checks. Duplicate prevention is handled client-side by the enrollment script, which checks for an existing agent configuration (`/etc/patchmon/config.yml`) inside each container before calling the API.
+> **Duplicate handling:** When `machine_id` is supplied, the server looks for an existing host with the same machine ID and the same name (compared case-insensitively) and returns `409 Conflict` instead of creating a second record. Matching on both means cloned containers that share one `/etc/machine-id` but carry different names still enrol as separate hosts. No credentials are generated for a rejected request. Requests without a `machine_id` are never deduplicated. The enrolment scripts treat a `409` as an already enrolled host and move on. This check applies only when no `host_id` is sent, or when the `host_id` is not found.
 
 ### Host Management Endpoints
 
@@ -3184,6 +3406,8 @@ Content-Type: application/json
 | `bootTime` | string | No | Boot instant as a UTC ISO 8601 timestamp. Lets the UI tick uptime live between reports |
 | `loadAverage` | array | No | Load average values |
 | `machineId` | string | No | Machine ID |
+| `hostId` | string | No | `host_id` from the agent's `config.yml` (agent 2.1.4+). A value that differs from the authenticated host's ID does not reject the report; the host is flagged with a host ID mismatch |
+| `configVersion` | string | No | `config_version` from the agent's `config.yml` (agent 2.1.4+). Recorded only when it starts with `N.N.N` (optionally followed by a pre-release or build suffix) and is at most 64 bytes |
 | `needsReboot` | boolean | No | Whether a reboot is required |
 | `rebootReason` | string | No | Reason a reboot is required |
 | `repositories` | array | No | Configured package repositories |
@@ -3235,9 +3459,12 @@ Content-Type: application/json
   "message": "Host updated successfully",
   "packagesProcessed": 1,
   "updatesAvailable": 1,
-  "securityUpdates": 0
+  "securityUpdates": 0,
+  "hostId": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
+
+`hostId` (2.1.4+) is the ID of the host the credentials belong to. Agents record it in `config.yml` as `host_id` when they have none.
 
 ### Ansible Integration Examples
 
@@ -3453,13 +3680,14 @@ vault_patchmon_token_secret: "def456ghi789..."
 
 | Code | Meaning | When It Occurs |
 |------|---------|----------------|
-| `200` | OK | Successful read/update operations |
+| `200` | OK | Successful read/update operations, and credentials re-issued by enrolment (`reenrolled: true`) |
 | `201` | Created | Token or host created successfully |
 | `400` | Bad Request | Validation errors, invalid host group, invalid script type |
 | `401` | Unauthorized | Missing, invalid, or expired credentials |
 | `403` | Forbidden | IP address not in token's whitelist |
 | `404` | Not Found | Token or resource not found |
-| `429` | Too Many Requests | Token's daily host creation limit exceeded |
+| `409` | Conflict | Enrolment refused; see the `code` field |
+| `429` | Too Many Requests | Token's daily host creation limit exceeded, or enrolment re-issue cooldown (`reenrol_cooldown`) |
 | `500` | Internal Server Error | Unexpected server error |
 
 #### Error Response Formats
@@ -3475,7 +3703,17 @@ vault_patchmon_token_secret: "def456ghi789..."
 ```json
 {
   "error": "Rate limit exceeded",
-  "message": "Maximum 100 hosts per day allowed for this token"
+  "message": "Maximum hosts per day allowed for this token"
+}
+```
+
+**Error with code** (enrolment `409` and `429` responses):
+```json
+{
+  "error": "Credentials for this host were re-issued less than a minute ago. Try again shortly.",
+  "code": "reenrol_cooldown",
+  "friendly_name": "webserver",
+  "host_id": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
 
@@ -3503,14 +3741,20 @@ Each auto-enrollment token has a configurable `max_hosts_per_day` limit:
 - **Reset**: Daily (when the first request of a new day is received)
 - **Scope**: Per-token, not per-IP
 
+The limit counts hosts created. Re-issuing credentials for an existing host (`200`, `reenrolled: true`) is not counted and is not blocked by the limit.
+
 When the limit is exceeded, the API returns `429 Too Many Requests`:
 
 ```json
 {
   "error": "Rate limit exceeded",
-  "message": "Maximum 100 hosts per day allowed for this token"
+  "message": "Maximum hosts per day allowed for this token"
 }
 ```
+
+#### Re-issue Cooldown
+
+PatchMon re-issues credentials for a given host at most once every 60 seconds. A second request within that window gets `429 Too Many Requests` with `"code": "reenrol_cooldown"`. This stops two copies of a cloned machine from repeatedly taking a pending host's credentials from each other.
 
 #### Global Rate Limiting
 
@@ -3523,7 +3767,7 @@ The auto-enrollment endpoints are also subject to the server's global authentica
 - **Secret hashing**: Token secrets are hashed with bcrypt (cost factor 10) before storage
 - **One-time display**: Secrets are only returned during token creation
 - **Rotation**: Recommended every 90 days
-- **Scope limitation**: Tokens can only create hosts. They cannot read, modify, or delete existing host data.
+- **Scope limitation**: Tokens can create hosts, and issue a new API key for a host created by the same token that has never reported. They cannot re-key a host that has reported, and cannot read, modify, or delete existing host data.
 
 #### IP Restrictions
 
@@ -3555,6 +3799,7 @@ All enrollment activity is logged:
 - Token name included in host notes (e.g. "Auto-enrolled via Production Proxmox on 2025-10-11T14:30:00Z")
 - Token creation tracks `created_by_user_id`
 - `last_used_at` timestamp updated on each enrollment
+- Credential re-issues and refused re-enrolments are written to the server log with the host ID, token name and client IP, and the time of the latest re-issue is shown on the host's page
 
 ### Complete Endpoint Summary
 
@@ -3650,7 +3895,7 @@ curl -s "https://patchmon.example.com/api/v1/auto-enrollment/script?type=proxmox
 
 ---
 
-## Chapter 6: Integration API Documentation {#integration-api-documentation}
+## Chapter 7: Integration API Documentation {#integration-api-documentation}
 
 ### Table of Contents
 
@@ -4128,7 +4373,8 @@ GET /api/v1/api/hosts/:id/info
   "ip": "192.168.1.100",
   "os_type": "Ubuntu",
   "os_version": "24.04 LTS",
-  "agent_version": "1.5.0",
+  "agent_version": "2.1.4",
+  "config_version": "2.1.4",
   "host_groups": [
     {
       "id": "660e8400-e29b-41d4-a716-446655440001",
@@ -4137,6 +4383,8 @@ GET /api/v1/api/hosts/:id/info
   ]
 }
 ```
+
+`config_version` (added in 2.1.4) is the `config.yml` layout version the agent last reported. It normally equals `agent_version`; it is an empty string when the agent is older than 2.1.4 or has not reported one.
 
 ---
 

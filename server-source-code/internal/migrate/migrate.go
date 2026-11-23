@@ -63,7 +63,7 @@ func Run(databaseURL string, log *slog.Logger) error {
 		return fmt.Errorf("DATABASE_URL is required for migrations")
 	}
 
-	databaseURL = ensureSSLMode(databaseURL)
+	databaseURL = EnsureSSLMode(databaseURL)
 
 	_, _ = fmt.Fprintln(os.Stdout, "[migrate] running migrations from embedded binary")
 	log.Info("running migrations", "path", "embedded")
@@ -124,6 +124,11 @@ func openTrack(t track, databaseURL string) (*migrate.Migrate, error) {
 	}
 	m, err := migrate.NewWithSourceInstance("iofs", source, withMigrationsTable(databaseURL, t.table))
 	if err != nil {
+		// A url.Error quotes the whole DSN, password included; never surface it.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return nil, fmt.Errorf("create migrate instance (%s track): invalid database URL", t.name)
+		}
 		return nil, fmt.Errorf("create migrate instance (%s track): %w", t.name, err)
 	}
 	return m, nil
@@ -135,7 +140,7 @@ func Open(databaseURL string) (*migrate.Migrate, error) {
 	if databaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required for migrations")
 	}
-	return openTrack(tracks[0], ensureSSLMode(databaseURL))
+	return openTrack(tracks[0], EnsureSSLMode(databaseURL))
 }
 
 // OpenFork returns a migrate instance for the fork track, for use by the CLI.
@@ -144,7 +149,7 @@ func OpenFork(databaseURL string) (*migrate.Migrate, error) {
 	if databaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required for migrations")
 	}
-	return openTrack(tracks[1], ensureSSLMode(databaseURL))
+	return openTrack(tracks[1], EnsureSSLMode(databaseURL))
 }
 
 // withMigrationsTable points the postgres driver at a specific version table
@@ -251,7 +256,8 @@ func databaseName(databaseURL string) string {
 	return "unknown"
 }
 
-func ensureSSLMode(databaseURL string) string {
+// EnsureSSLMode appends sslmode=disable when the URL sets no sslmode, as migrations require.
+func EnsureSSLMode(databaseURL string) string {
 	if !strings.Contains(databaseURL, "sslmode=") {
 		if strings.Contains(databaseURL, "?") {
 			databaseURL += "&sslmode=disable"

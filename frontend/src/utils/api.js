@@ -178,6 +178,8 @@ export const adminHostsAPI = {
 	deleteBulk: (hostIds) => api.delete("/hosts/bulk", { data: { hostIds } }),
 	regenerateCredentials: (hostId) =>
 		api.post(`/hosts/${hostId}/regenerate-credentials`),
+	dismissIdentityConflict: (hostId) =>
+		api.post(`/hosts/${hostId}/identity-conflict/dismiss`),
 	updateGroup: (hostId, hostGroupId) =>
 		api.put(`/hosts/${hostId}/group`, { hostGroupId }),
 	updateGroups: (hostId, groupIds) =>
@@ -240,6 +242,8 @@ export const adminHostsAPI = {
 	requestComplianceStatus: (hostId) =>
 		api.post(`/hosts/${hostId}/integrations/compliance/request-status`),
 	refreshDocker: (hostId) => api.post(`/hosts/${hostId}/refresh-docker`),
+	checkDockerImages: (hostId) =>
+		api.post(`/hosts/${hostId}/docker-image-check`),
 	setComplianceMode: (hostId, mode) =>
 		api.post(`/hosts/${hostId}/integrations/compliance/mode`, {
 			mode: mode,
@@ -252,6 +256,10 @@ export const adminHostsAPI = {
 		api.post(`/hosts/${hostId}/compliance/on-demand-only`, {
 			on_demand_only: onDemandOnly,
 		}),
+};
+
+export const dockerAPI = {
+	runImageChecks: () => api.post("/docker/image-checks/run"),
 };
 
 // Host Groups API
@@ -274,15 +282,23 @@ export const adminUsersAPI = {
 	delete: (userId) => api.delete(`/auth/admin/users/${userId}`),
 	resetPassword: (userId, newPassword) =>
 		api.post(`/auth/admin/users/${userId}/reset-password`, { newPassword }),
+	unlinkOidc: (userId) => api.post(`/auth/admin/users/${userId}/unlink-oidc`),
+	resetTfa: (userId, { password, tfaToken, newPassword }) =>
+		api.post(`/auth/admin/users/${userId}/reset-tfa`, {
+			password,
+			tfaToken,
+			newPassword,
+		}),
 };
 
 // Permissions API (for role management)
 export const permissionsAPI = {
 	getRoles: () => api.get("/permissions/roles"),
-	getRole: (role) => api.get(`/permissions/roles/${role}`),
+	getRole: (role) => api.get(`/permissions/roles/${encodeURIComponent(role)}`),
 	updateRole: (role, permissions) =>
-		api.put(`/permissions/roles/${role}`, permissions),
-	deleteRole: (role) => api.delete(`/permissions/roles/${role}`),
+		api.put(`/permissions/roles/${encodeURIComponent(role)}`, permissions),
+	deleteRole: (role) =>
+		api.delete(`/permissions/roles/${encodeURIComponent(role)}`),
 	getUserPermissions: () => api.get("/permissions/user-permissions"),
 };
 
@@ -292,6 +308,7 @@ export const settingsAPI = {
 	getPublic: () => api.get("/settings/public"), // Public endpoint for read-only settings (auto_update, etc.)
 	update: (settings) => api.put("/settings", settings),
 	getServerUrl: () => api.get("/settings/server-url"),
+	checkServerUrlCors: () => api.get("/settings/server-url/cors-check"),
 	getCurrentUrl: () => api.get("/settings/current-url"),
 	getEnvConfig: () => api.get("/settings/env-config"),
 	getEnvironmentConfig: () => api.get("/settings/environment"),
@@ -431,13 +448,14 @@ export const hostsAPI = {
 // Packages API
 export const packagesAPI = {
 	getAll: (params = {}) => api.get("/packages", { params }),
-	getById: (packageId) => api.get(`/packages/${packageId}`),
+	getById: (packageId) => api.get(`/packages/${encodeURIComponent(packageId)}`),
 	getCategories: () => api.get("/packages/categories/list"),
 	getHosts: (packageId, params = {}) =>
-		api.get(`/packages/${packageId}/hosts`, { params }),
+		api.get(`/packages/${encodeURIComponent(packageId)}/hosts`, { params }),
 	getActivity: (packageId, params = {}) =>
-		api.get(`/packages/${packageId}/activity`, { params }).then((r) => r.data),
-	update: (packageId, data) => api.put(`/packages/${packageId}`, data),
+		api
+			.get(`/packages/${encodeURIComponent(packageId)}/activity`, { params })
+			.then((r) => r.data),
 };
 
 // Utility functions
@@ -608,8 +626,10 @@ export const agentVersionAPI = {
 };
 
 // RDP API (in-browser RDP for Windows hosts via guacd)
+// Must exceed the server's 12s agent handshake so its agent_timeout reply reaches the UI.
 export const rdpAPI = {
-	createTicket: (data) => api.post("/auth/rdp-ticket", data),
+	createTicket: (data) =>
+		api.post("/auth/rdp-ticket", data, { timeout: 20000 }),
 };
 
 // Auth API

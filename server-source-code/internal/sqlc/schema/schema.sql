@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS settings (
     compliance_scan_interval INTEGER NOT NULL DEFAULT 1440,
     package_cache_refresh_mode TEXT NOT NULL DEFAULT 'always',
     package_cache_refresh_max_age INTEGER NOT NULL DEFAULT 60,
+    apt_disable_retries BOOLEAN NOT NULL DEFAULT true,
     github_repo_url TEXT NOT NULL DEFAULT 'https://github.com/PatchMon/PatchMon.git',
     ssh_key_path TEXT,
     repository_type TEXT NOT NULL DEFAULT 'public',
@@ -94,6 +95,7 @@ CREATE TABLE IF NOT EXISTS settings (
     oidc_user_group TEXT,
     oidc_enforce_https BOOLEAN NOT NULL DEFAULT true,
     oidc_trust_unverified_email BOOLEAN NOT NULL DEFAULT false,
+    oidc_local_auth_fallback BOOLEAN NOT NULL DEFAULT false,
     max_login_attempts INTEGER,
     lockout_duration_minutes INTEGER,
     session_inactivity_timeout_minutes INTEGER,
@@ -196,7 +198,10 @@ CREATE TABLE IF NOT EXISTS users (
     discord_avatar TEXT,
     discord_linked_at TIMESTAMP(3),
     newsletter_subscribed BOOLEAN NOT NULL DEFAULT false,
-    newsletter_subscribed_at TIMESTAMP(3)
+    newsletter_subscribed_at TIMESTAMP(3),
+    tfa_enrolment_required BOOLEAN NOT NULL DEFAULT false,
+    password_change_required BOOLEAN NOT NULL DEFAULT false,
+    previous_password_hash TEXT
 );
 
 -- hosts
@@ -234,6 +239,7 @@ CREATE TABLE IF NOT EXISTS hosts (
     notes TEXT,
     needs_reboot BOOLEAN DEFAULT false,
     reboot_reason TEXT,
+    patch_reboot_pending_boot_time TIMESTAMPTZ,
     docker_enabled BOOLEAN NOT NULL DEFAULT false,
     compliance_enabled BOOLEAN NOT NULL DEFAULT false,
     compliance_on_demand_only BOOLEAN NOT NULL DEFAULT true,
@@ -253,8 +259,29 @@ CREATE TABLE IF NOT EXISTS hosts (
     hostname_hash TEXT,
     docker_hash TEXT,
     compliance_hash TEXT,
-    last_full_report_at TIMESTAMP(3)
+    last_full_report_at TIMESTAMP(3),
+    config_version TEXT,
+    reported_host_id TEXT,
+    enrolment_token_id TEXT REFERENCES auto_enrollment_tokens(id) ON DELETE SET NULL,
+    credentials_reissued_at TIMESTAMP(3),
+    identity_fingerprint TEXT,
+    identity_prev_fingerprint TEXT,
+    identity_fingerprint_changed_at TIMESTAMP(3),
+    identity_conflict_at TIMESTAMP(3),
+    enrolment_machine_id TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_hosts_machine_id
+    ON hosts (machine_id);
+
+CREATE INDEX IF NOT EXISTS idx_hosts_enrolment_token_id
+    ON hosts (enrolment_token_id) WHERE enrolment_token_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_hosts_enrolment_machine_id_norm
+    ON hosts (lower(replace(enrolment_machine_id, '-', ''))) WHERE enrolment_machine_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_hosts_machine_id_norm
+    ON hosts (lower(replace(machine_id, '-', '')));
 
 -- dashboard_preferences
 CREATE TABLE IF NOT EXISTS dashboard_preferences (
@@ -317,8 +344,12 @@ CREATE TABLE IF NOT EXISTS host_packages (
     wua_support_url     TEXT,
     wua_revision_number INTEGER,
     wua_date_installed  TIMESTAMP(3),
-    wua_install_result  TEXT,
     source_repository_id TEXT REFERENCES repositories(id) ON DELETE SET NULL,
+    winget_id TEXT,
+    winget_pinned BOOLEAN,
+    winget_store_app BOOLEAN,
+    wua_browse_only BOOLEAN,
+    wua_update_type TEXT,
     UNIQUE(host_id, package_id)
 );
 
@@ -460,7 +491,34 @@ CREATE TABLE IF NOT EXISTS docker_containers (
     started_at TIMESTAMP(3),
     updated_at TIMESTAMP(3) NOT NULL,
     last_checked TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    image_stale BOOLEAN NOT NULL DEFAULT false,
+    restart_count INTEGER NOT NULL DEFAULT 0,
+    image_digest TEXT,
     UNIQUE(host_id, container_id)
+);
+
+-- docker_host_images
+CREATE TABLE IF NOT EXISTS docker_host_images (
+    host_id TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    image_id TEXT NOT NULL REFERENCES docker_images(id) ON DELETE CASCADE,
+    last_seen TIMESTAMP(3) NOT NULL,
+    PRIMARY KEY(host_id, image_id)
+);
+
+-- docker_image_checks
+CREATE TABLE IF NOT EXISTS docker_image_checks (
+    id TEXT PRIMARY KEY,
+    host_id TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    image_id TEXT NOT NULL REFERENCES docker_images(id) ON DELETE CASCADE,
+    status TEXT NOT NULL,
+    local_digest TEXT,
+    remote_digest TEXT,
+    registry TEXT,
+    reason TEXT,
+    checked_at TIMESTAMP(3) NOT NULL,
+    first_seen_update_at TIMESTAMP(3),
+    updated_at TIMESTAMP(3) NOT NULL,
+    UNIQUE(host_id, image_id)
 );
 
 -- docker_image_updates
@@ -535,6 +593,10 @@ CREATE TABLE IF NOT EXISTS job_history (
     updated_at TIMESTAMP(3) NOT NULL,
     completed_at TIMESTAMP(3)
 );
+CREATE INDEX IF NOT EXISTS idx_job_history_host_id_created_at
+    ON job_history (host_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_job_history_job_id_created_at
+    ON job_history (job_id, created_at DESC);
 
 -- release_notes_acceptances
 CREATE TABLE IF NOT EXISTS release_notes_acceptances (
@@ -543,6 +605,12 @@ CREATE TABLE IF NOT EXISTS release_notes_acceptances (
     version TEXT NOT NULL,
     accepted_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(user_id, version)
+);
+
+-- install_state
+CREATE TABLE IF NOT EXISTS install_state (
+    id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    setup_completed_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- audit_logs
@@ -730,8 +798,41 @@ CREATE TABLE IF NOT EXISTS patch_runs (
     policy_snapshot JSONB,
     validation_run_id TEXT REFERENCES patch_runs(id) ON DELETE SET NULL,
     created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP(3) NOT NULL
+    updated_at TIMESTAMP(3) NOT NULL,
+    reboot_required BOOLEAN,
+    windows_include_updates BOOLEAN,
+    windows_include_apps BOOLEAN
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS patch_runs_one_active_per_host
+    ON patch_runs (host_id)
+    WHERE status IN ('queued', 'pending_validation', 'running');
+
+-- patch_run_items
+CREATE TABLE IF NOT EXISTS patch_run_items (
+    id TEXT PRIMARY KEY,
+    patch_run_id TEXT NOT NULL REFERENCES patch_runs(id) ON DELETE CASCADE,
+    host_id TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('wua', 'winget')),
+    identifier TEXT NOT NULL,
+    revision_number INTEGER,
+    title TEXT NOT NULL,
+    kb TEXT,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'would_install', 'not_applicable', 'installed',
+        'installed_with_errors', 'installed_pending_reboot', 'already_installed', 'failed', 'aborted', 'skipped')),
+    result_code INTEGER,
+    hresult TEXT,
+    exit_code BIGINT,
+    reboot_required BOOLEAN NOT NULL DEFAULT false,
+    download_bytes BIGINT,
+    message TEXT,
+    started_at TIMESTAMP(3),
+    completed_at TIMESTAMP(3),
+    created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (patch_run_id, kind, identifier)
+);
+CREATE INDEX IF NOT EXISTS idx_patch_run_items_host_identifier ON patch_run_items (host_id, identifier);
 
 -- alert_config
 CREATE TABLE IF NOT EXISTS alert_config (
@@ -753,6 +854,7 @@ CREATE TABLE IF NOT EXISTS alert_config (
     metadata JSONB,
     category TEXT NOT NULL DEFAULT 'general',
     check_interval_minutes INTEGER,
+    reminder_interval_hours INTEGER,
     created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP(3) NOT NULL
 );

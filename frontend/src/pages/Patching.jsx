@@ -44,11 +44,13 @@ import {
 } from "../components/patching/widgets";
 import TierBadge from "../components/TierBadge";
 import UpgradeRequiredContent from "../components/UpgradeRequiredContent";
+import ModalPortal from "../components/ui/ModalPortal";
 import { getRequiredTier } from "../constants/tiers";
 import { useAuth } from "../contexts/AuthContext";
 import { useConfirm } from "../contexts/ConfirmContext";
 import { useSettings } from "../contexts/SettingsContext";
 import { useToast } from "../contexts/ToastContext";
+import { searchWithoutTab, useTabParam } from "../hooks/useTabParam";
 import { adminHostsAPI, formatDate, hostGroupsAPI } from "../utils/api";
 import { patchingAPI } from "../utils/patchingApi";
 import { hasExtraDependencies } from "../utils/patchRun";
@@ -80,19 +82,21 @@ const Patching = () => {
 	const initialType = searchParams.get("type") || "";
 	const [activeTab, setActiveTab] = useState(initialTab);
 
-	// Sync tab and filter state on actual URL navigation (not in-page tab clicks)
+	useTabParam(activeTab);
+
 	useEffect(() => {
-		const params = new URLSearchParams(location.search);
-		const tab = params.get("tab");
-		if (tab && ["overview", "runs", "policies"].includes(tab)) {
-			setActiveTab(tab);
+		if (urlTab && ["overview", "runs", "policies"].includes(urlTab)) {
+			setActiveTab(urlTab);
 		}
-		const status = params.get("status") || "";
-		setRunsFilterStatus(status);
-		const type = params.get("type") || "";
-		setRunsFilterType(type);
+	}, [urlTab]);
+
+	const filterSearch = searchWithoutTab(location.search);
+	useEffect(() => {
+		const params = new URLSearchParams(filterSearch);
+		setRunsFilterStatus(params.get("status") || "");
+		setRunsFilterType(params.get("type") || "");
 		setRunsPage(1);
-	}, [location.search]);
+	}, [filterSearch]);
 
 	const [runsFilterStatus, setRunsFilterStatus] = useState(initialStatus);
 	const [runsFilterType, setRunsFilterType] = useState(initialType);
@@ -259,6 +263,7 @@ const Patching = () => {
 			hostname: run.hosts?.hostname,
 		},
 		patchType: run.patch_type,
+		windowsScope: run.windows_scope || null,
 		packageNames:
 			Array.isArray(run.package_names) && run.package_names.length > 0
 				? run.package_names
@@ -375,16 +380,18 @@ const Patching = () => {
 					type="button"
 					onClick={() => navigate("/patching?tab=runs&status=active")}
 					className="card p-4 hover:shadow-card-hover dark:hover:shadow-card-hover-dark transition-shadow text-left"
-					title="View queued and running runs"
+					title="View queued, validating and running runs"
 				>
 					<div className="flex items-center">
 						<Clock className="h-5 w-5 text-blue-600 mr-2" />
 						<div>
 							<p className="text-sm text-secondary-500 dark:text-white">
-								Queued / Running
+								Active
 							</p>
 							<p className="text-xl font-semibold text-secondary-900 dark:text-white">
-								{(summary.queued ?? 0) + (summary.running ?? 0)}
+								{(summary.queued ?? 0) +
+									(summary.pending_validation ?? 0) +
+									(summary.running ?? 0)}
 							</p>
 						</div>
 					</div>
@@ -552,6 +559,11 @@ const Patching = () => {
 					patchTypeByRun={Object.fromEntries(
 						approveWizardRuns.map((r) => [r.runId, r.patchType]),
 					)}
+					windowsScopeByRun={Object.fromEntries(
+						approveWizardRuns
+							.filter((r) => r.windowsScope)
+							.map((r) => [r.runId, r.windowsScope]),
+					)}
 					onSuccess={handleApproveWizardSuccess}
 				/>
 			)}
@@ -563,7 +575,7 @@ const Patching = () => {
 
 const STATUS_OPTIONS = [
 	{ value: "", label: "All statuses" },
-	{ value: "active", label: "Active (queued + running)" },
+	{ value: "active", label: "Active (queued, validating or running)" },
 	{ value: "queued", label: "Queued" },
 	{ value: "pending_validation", label: "Pending validation" },
 	{ value: "pending_approval", label: "Pending approval" },
@@ -1213,7 +1225,7 @@ function RunsTab({
 													</div>
 												</td>
 												<td className="px-3 sm:px-4 py-2 text-sm text-secondary-900 dark:text-white min-w-0">
-													<div className="max-w-[320px]">
+													<div className="min-w-0 max-w-[320px] overflow-hidden">
 														<CompactPackageSummary run={run} />
 													</div>
 												</td>
@@ -1654,146 +1666,158 @@ function PoliciesTab() {
 
 			{/* Create/Edit Modal */}
 			{showModal && (
-				<div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
-					<div className="bg-white dark:bg-secondary-800 rounded-lg shadow-xl max-w-md w-full max-h-[90vh] overflow-y-auto">
-						<div className="flex items-center justify-between p-4 border-b border-secondary-200 dark:border-secondary-600">
-							<h3 className="text-lg font-semibold text-secondary-900 dark:text-white">
-								{editingPolicy ? "Edit policy" : "Create policy"}
-							</h3>
-							<button
-								type="button"
-								onClick={() => setShowModal(false)}
-								className="p-1 rounded hover:bg-secondary-100 dark:hover:bg-secondary-700"
-							>
-								<X className="h-5 w-5" />
-							</button>
-						</div>
-						<form onSubmit={handleSubmit} className="p-4 space-y-4">
-							<div>
-								<label className="block text-sm font-medium text-secondary-700 dark:text-secondary-300 mb-1">
-									Name
-								</label>
-								<input
-									type="text"
-									value={form.name}
-									onChange={(e) =>
-										setForm((f) => ({ ...f, name: e.target.value }))
-									}
-									className="w-full rounded border border-secondary-300 dark:border-secondary-600 bg-white dark:bg-secondary-700 text-secondary-900 dark:text-white px-3 py-2"
-									required
-								/>
-							</div>
-							<div>
-								<label className="block text-sm font-medium text-secondary-700 dark:text-secondary-300 mb-1">
-									Description (optional)
-								</label>
-								<input
-									type="text"
-									value={form.description}
-									onChange={(e) =>
-										setForm((f) => ({
-											...f,
-											description: e.target.value,
-										}))
-									}
-									className="w-full rounded border border-secondary-300 dark:border-secondary-600 bg-white dark:bg-secondary-700 text-secondary-900 dark:text-white px-3 py-2"
-								/>
-							</div>
-							<div>
-								<label className="block text-sm font-medium text-secondary-700 dark:text-secondary-300 mb-1">
-									Patch delay
-								</label>
-								<select
-									value={form.patch_delay_type}
-									onChange={(e) =>
-										setForm((f) => ({
-											...f,
-											patch_delay_type: e.target.value,
-										}))
-									}
-									className="w-full rounded border border-secondary-300 dark:border-secondary-600 bg-white dark:bg-secondary-700 text-secondary-900 dark:text-white px-3 py-2"
+				<ModalPortal>
+					<div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/50">
+						<div className="bg-white dark:bg-secondary-800 rounded-lg shadow-xl max-w-md w-full max-h-[90vh] overflow-y-auto">
+							<div className="flex items-center justify-between p-4 border-b border-secondary-200 dark:border-secondary-600">
+								<h3 className="text-lg font-semibold text-secondary-900 dark:text-white">
+									{editingPolicy ? "Edit policy" : "Create policy"}
+								</h3>
+								<button
+									type="button"
+									onClick={() => setShowModal(false)}
+									className="p-1 rounded hover:bg-secondary-100 dark:hover:bg-secondary-700"
 								>
-									<option value="immediate">Immediate</option>
-									<option value="delayed">Delayed (run after N minutes)</option>
-									<option value="fixed_time">Fixed time (e.g. 3:00 AM)</option>
-								</select>
+									<X className="h-5 w-5" />
+								</button>
 							</div>
-							{form.patch_delay_type === "delayed" && (
+							<form onSubmit={handleSubmit} className="p-4 space-y-4">
 								<div>
 									<label className="block text-sm font-medium text-secondary-700 dark:text-secondary-300 mb-1">
-										Delay (minutes)
-									</label>
-									<input
-										type="number"
-										min={1}
-										value={form.delay_minutes}
-										onChange={(e) =>
-											setForm((f) => ({
-												...f,
-												delay_minutes: e.target.value,
-											}))
-										}
-										className="w-full rounded border border-secondary-300 dark:border-secondary-600 bg-white dark:bg-secondary-700 text-secondary-900 dark:text-white px-3 py-2"
-									/>
-								</div>
-							)}
-							{form.patch_delay_type === "fixed_time" && (
-								<div>
-									<label className="block text-sm font-medium text-secondary-700 dark:text-secondary-300 mb-1">
-										Time (HH:MM)
+										Name
 									</label>
 									<input
 										type="text"
-										placeholder="03:00"
-										value={form.fixed_time_utc}
+										value={form.name}
+										onChange={(e) =>
+											setForm((f) => ({ ...f, name: e.target.value }))
+										}
+										className="w-full rounded border border-secondary-300 dark:border-secondary-600 bg-white dark:bg-secondary-700 text-secondary-900 dark:text-white px-3 py-2"
+										required
+									/>
+								</div>
+								<div>
+									<label className="block text-sm font-medium text-secondary-700 dark:text-secondary-300 mb-1">
+										Description (optional)
+									</label>
+									<input
+										type="text"
+										value={form.description}
 										onChange={(e) =>
 											setForm((f) => ({
 												...f,
-												fixed_time_utc: e.target.value,
+												description: e.target.value,
 											}))
 										}
 										className="w-full rounded border border-secondary-300 dark:border-secondary-600 bg-white dark:bg-secondary-700 text-secondary-900 dark:text-white px-3 py-2"
 									/>
-									<p className="mt-1 text-xs text-secondary-500 dark:text-secondary-400">
-										Local time in the organization timezone (
-										<span className="font-medium">{orgTimezone}</span>). Change
-										it under Settings &rarr; General.
-									</p>
 								</div>
-							)}
-
-							{/* Automated patching schedule */}
-							<div className="border-t border-secondary-200 dark:border-secondary-600 pt-4 space-y-3">
-								<label className="flex items-center gap-2 cursor-pointer">
-									<input
-										type="checkbox"
-										checked={form.auto_patch_enabled}
+								<div>
+									<label className="block text-sm font-medium text-secondary-700 dark:text-secondary-300 mb-1">
+										Patch delay
+									</label>
+									<select
+										value={form.patch_delay_type}
 										onChange={(e) =>
 											setForm((f) => ({
 												...f,
-												auto_patch_enabled: e.target.checked,
+												patch_delay_type: e.target.value,
 											}))
 										}
-										className="rounded border-secondary-300 dark:border-secondary-600"
-									/>
-									<span className="text-sm font-medium text-secondary-700 dark:text-secondary-300">
-										Automated patching
-									</span>
-								</label>
-								<p className="text-xs text-secondary-500 dark:text-secondary-400">
-									Automatically run "Patch all" on every host assigned to this
-									policy (directly or via groups, respecting exclusions) on the
-									selected days — no manual trigger needed.
-								</p>
-								{form.auto_patch_enabled && (
-									<>
-										<div>
-											<span className="block text-sm font-medium text-secondary-700 dark:text-secondary-300 mb-1">
-												Days
-											</span>
-											<div className="flex flex-wrap gap-1.5">
-												{["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(
-													(label, day) => (
+										className="w-full rounded border border-secondary-300 dark:border-secondary-600 bg-white dark:bg-secondary-700 text-secondary-900 dark:text-white px-3 py-2"
+									>
+										<option value="immediate">Immediate</option>
+										<option value="delayed">
+											Delayed (run after N minutes)
+										</option>
+										<option value="fixed_time">
+											Fixed time (e.g. 3:00 AM)
+										</option>
+									</select>
+								</div>
+								{form.patch_delay_type === "delayed" && (
+									<div>
+										<label className="block text-sm font-medium text-secondary-700 dark:text-secondary-300 mb-1">
+											Delay (minutes)
+										</label>
+										<input
+											type="number"
+											min={1}
+											value={form.delay_minutes}
+											onChange={(e) =>
+												setForm((f) => ({
+													...f,
+													delay_minutes: e.target.value,
+												}))
+											}
+											className="w-full rounded border border-secondary-300 dark:border-secondary-600 bg-white dark:bg-secondary-700 text-secondary-900 dark:text-white px-3 py-2"
+										/>
+									</div>
+								)}
+								{form.patch_delay_type === "fixed_time" && (
+									<div>
+										<label className="block text-sm font-medium text-secondary-700 dark:text-secondary-300 mb-1">
+											Time (HH:MM)
+										</label>
+										<input
+											type="text"
+											placeholder="03:00"
+											value={form.fixed_time_utc}
+											onChange={(e) =>
+												setForm((f) => ({
+													...f,
+													fixed_time_utc: e.target.value,
+												}))
+											}
+											className="w-full rounded border border-secondary-300 dark:border-secondary-600 bg-white dark:bg-secondary-700 text-secondary-900 dark:text-white px-3 py-2"
+										/>
+										<p className="mt-1 text-xs text-secondary-500 dark:text-secondary-400">
+											Local time in the organization timezone (
+											<span className="font-medium">{orgTimezone}</span>).
+											Change it under Settings &rarr; General.
+										</p>
+									</div>
+								)}
+
+								{/* Automated patching schedule */}
+								<div className="border-t border-secondary-200 dark:border-secondary-600 pt-4 space-y-3">
+									<label className="flex items-center gap-2 cursor-pointer">
+										<input
+											type="checkbox"
+											checked={form.auto_patch_enabled}
+											onChange={(e) =>
+												setForm((f) => ({
+													...f,
+													auto_patch_enabled: e.target.checked,
+												}))
+											}
+											className="rounded border-secondary-300 dark:border-secondary-600"
+										/>
+										<span className="text-sm font-medium text-secondary-700 dark:text-secondary-300">
+											Automated patching
+										</span>
+									</label>
+									<p className="text-xs text-secondary-500 dark:text-secondary-400">
+										Automatically run "Patch all" on every host assigned to this
+										policy (directly or via groups, respecting exclusions) on
+										the selected days — no manual trigger needed.
+									</p>
+									{form.auto_patch_enabled && (
+										<>
+											<div>
+												<span className="block text-sm font-medium text-secondary-700 dark:text-secondary-300 mb-1">
+													Days
+												</span>
+												<div className="flex flex-wrap gap-1.5">
+													{[
+														"Sun",
+														"Mon",
+														"Tue",
+														"Wed",
+														"Thu",
+														"Fri",
+														"Sat",
+													].map((label, day) => (
 														<button
 															key={label}
 															type="button"
@@ -1806,77 +1830,78 @@ function PoliciesTab() {
 														>
 															{label}
 														</button>
-													),
-												)}
+													))}
+												</div>
 											</div>
-										</div>
-										<div>
-											<label className="block text-sm font-medium text-secondary-700 dark:text-secondary-300 mb-1">
-												Time (HH:MM)
+											<div>
+												<label className="block text-sm font-medium text-secondary-700 dark:text-secondary-300 mb-1">
+													Time (HH:MM)
+												</label>
+												<input
+													type="text"
+													placeholder="03:00"
+													value={form.auto_patch_time}
+													onChange={(e) =>
+														setForm((f) => ({
+															...f,
+															auto_patch_time: e.target.value,
+														}))
+													}
+													className="w-full rounded border border-secondary-300 dark:border-secondary-600 bg-white dark:bg-secondary-700 text-secondary-900 dark:text-white px-3 py-2"
+												/>
+												<p className="mt-1 text-xs text-secondary-500 dark:text-secondary-400">
+													Organization timezone (
+													<span className="font-medium">{orgTimezone}</span>).
+												</p>
+											</div>
+											<label className="flex items-center gap-2 cursor-pointer">
+												<input
+													type="checkbox"
+													checked={form.auto_reboot}
+													onChange={(e) =>
+														setForm((f) => ({
+															...f,
+															auto_reboot: e.target.checked,
+														}))
+													}
+													className="rounded border-secondary-300 dark:border-secondary-600"
+												/>
+												<span className="text-sm text-secondary-700 dark:text-secondary-300">
+													Reboot after patching if the host requires it
+												</span>
 											</label>
-											<input
-												type="text"
-												placeholder="03:00"
-												value={form.auto_patch_time}
-												onChange={(e) =>
-													setForm((f) => ({
-														...f,
-														auto_patch_time: e.target.value,
-													}))
-												}
-												className="w-full rounded border border-secondary-300 dark:border-secondary-600 bg-white dark:bg-secondary-700 text-secondary-900 dark:text-white px-3 py-2"
-											/>
-											<p className="mt-1 text-xs text-secondary-500 dark:text-secondary-400">
-												Organization timezone (
-												<span className="font-medium">{orgTimezone}</span>).
+											<p className="text-xs text-amber-600 dark:text-amber-400">
+												Hosts reboot ~1 minute after a successful automated
+												patch run, only when a pending reboot is detected
+												(kernel/libc updates). Manual patch runs never trigger
+												this.
 											</p>
-										</div>
-										<label className="flex items-center gap-2 cursor-pointer">
-											<input
-												type="checkbox"
-												checked={form.auto_reboot}
-												onChange={(e) =>
-													setForm((f) => ({
-														...f,
-														auto_reboot: e.target.checked,
-													}))
-												}
-												className="rounded border-secondary-300 dark:border-secondary-600"
-											/>
-											<span className="text-sm text-secondary-700 dark:text-secondary-300">
-												Reboot after patching if the host requires it
-											</span>
-										</label>
-										<p className="text-xs text-amber-600 dark:text-amber-400">
-											Hosts reboot ~1 minute after a successful automated patch
-											run, only when a pending reboot is detected (kernel/libc
-											updates). Manual patch runs never trigger this.
-										</p>
-									</>
-								)}
-							</div>
+										</>
+									)}
+								</div>
 
-							<div className="flex justify-end gap-2 pt-2">
-								<button
-									type="button"
-									onClick={() => setShowModal(false)}
-									className="btn-outline"
-								>
-									Cancel
-								</button>
-								<button
-									type="submit"
-									className="btn-primary"
-									disabled={
-										createMutation.isPending || updateMutation.isPending
-									}
-								>
-									{editingPolicy ? "Update" : "Create"}
-								</button>
-							</div>
-						</form>
+								<div className="flex justify-end gap-2 pt-2">
+									<button
+										type="button"
+										onClick={() => setShowModal(false)}
+										className="btn-outline"
+									>
+										Cancel
+									</button>
+									<button
+										type="submit"
+										className="btn-primary"
+										disabled={
+											createMutation.isPending || updateMutation.isPending
+										}
+									>
+										{editingPolicy ? "Update" : "Create"}
+									</button>
+								</div>
+							</form>
+						</div>
 					</div>
-				</div>
+				</ModalPortal>
 			)}
 		</div>
 	);

@@ -44,14 +44,14 @@ import React, {
 	useRef,
 	useState,
 } from "react";
-import {
-	Link,
-	useLocation,
-	useNavigate,
-	useParams,
-	useSearchParams,
-} from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
+import UpdateStatusBadge from "../components/docker/UpdateStatusBadge";
 import HostStatusPills from "../components/HostStatusPills";
+import {
+	AgentVersionIndicators,
+	ConfigVersionValue,
+	HostIdentityBanners,
+} from "../components/host/HostIdentity";
 import InlineEdit from "../components/InlineEdit";
 import InlineMultiGroupEdit from "../components/InlineMultiGroupEdit";
 import { PackageListDisplay } from "../components/PackageListDisplay";
@@ -61,9 +61,11 @@ import RdpViewer from "../components/RdpViewer";
 import SshTerminal from "../components/SshTerminal";
 import TierBadge from "../components/TierBadge";
 import UpgradeRequiredContent from "../components/UpgradeRequiredContent";
+import ModalPortal from "../components/ui/ModalPortal";
 import { getRequiredTier } from "../constants/tiers";
 import { useAuth } from "../contexts/AuthContext";
 import { useToast } from "../contexts/ToastContext";
+import { useHostDetailTab } from "../hooks/useHostDetailTab";
 import { usePageRefresh } from "../hooks/usePageRefresh";
 import { useTick } from "../hooks/useTick";
 import {
@@ -77,9 +79,16 @@ import {
 	settingsAPI,
 } from "../utils/api";
 import { complianceAPI } from "../utils/complianceApi";
+import { shortImageId } from "../utils/docker";
+import {
+	hostIsFreeBSD,
+	hostIsWindows,
+	showsSELinuxStatus,
+} from "../utils/hostPlatform";
 import { OSIcon } from "../utils/osIcons.jsx";
 import { patchingAPI } from "../utils/patchingApi";
 import { invalidateHostScope } from "../utils/queryScopes";
+import { getRemoteAccessTabs } from "../utils/remoteAccessTabs";
 import AgentActivityTab from "./hostdetail/AgentActivityTab";
 import CredentialsModal from "./hostdetail/CredentialsModal";
 import DeleteConfirmationModal from "./hostdetail/DeleteConfirmationModal";
@@ -120,16 +129,15 @@ const HostDetail = () => {
 	const { hostId } = useParams();
 	const navigate = useNavigate();
 	const location = useLocation();
-	const [searchParams, setSearchParams] = useSearchParams();
 	const queryClient = useQueryClient();
 	const toast = useToast();
-	const { canManageHosts, hasModule } = useAuth();
+	const { canManageHosts, canUseRemoteAccess, hasModule } = useAuth();
 	const [showCredentialsModal, setShowCredentialsModal] = useState(false);
 
 	// Get plaintext API key from navigation state (only available immediately after host creation)
 	const plaintextApiKey = location.state?.apiKey;
 	const [showDeleteModal, setShowDeleteModal] = useState(false);
-	const [activeTab, setActiveTab] = useState("host");
+	const [activeTab, handleTabChange] = useHostDetailTab();
 	const [dockerSubTab, setDockerSubTab] = useState("containers");
 	const [patchingRunsSortField, setPatchingRunsSortField] =
 		useState("created_at");
@@ -165,6 +173,7 @@ const HostDetail = () => {
 		"xccdf_org.ssgproject.content_profile_cis_level1_server",
 	);
 	const complianceInstallPollRef = useRef(null);
+	const mobileIntegrationsRef = useRef(null);
 
 	// State for auto-update confirmation dialog
 	const [autoUpdateDialog, setAutoUpdateDialog] = useState(false);
@@ -321,95 +330,6 @@ const HostDetail = () => {
 		staleTime: 5 * 60 * 1000, // 5 minutes - data stays fresh longer
 	});
 
-	// Tab change handler. Mirror "activity" into ?tab= so the new merged tab is
-	// shareable. Other tabs continue to use location-state navigation only — we
-	// don't want to churn the URL across the dozen pre-existing tabs.
-	const handleTabChange = (tabName) => {
-		setActiveTab(tabName);
-		if (tabName === "activity") {
-			setSearchParams(
-				(prev) => {
-					const next = new URLSearchParams(prev);
-					next.set("tab", "activity");
-					return next;
-				},
-				{ replace: true },
-			);
-		} else if (searchParams.get("tab")) {
-			// Leaving the activity tab — drop the legacy/active tab param so
-			// downstream filter params aren't carried over to other tabs.
-			setSearchParams(
-				(prev) => {
-					const next = new URLSearchParams(prev);
-					next.delete("tab");
-					for (const key of [
-						"direction",
-						"type",
-						"status",
-						"since",
-						"q",
-						"page",
-					]) {
-						next.delete(key);
-					}
-					return next;
-				},
-				{ replace: true },
-			);
-		}
-	};
-
-	// Open requested tab when navigating with state (e.g. from Compliance page link)
-	useEffect(() => {
-		const requestedTab = location.state?.tab;
-		const allowed = [
-			"host",
-			"network",
-			"system",
-			"activity",
-			"notes",
-			"integrations",
-			"reporting",
-			"docker",
-			"compliance",
-			"terminal",
-			"rdp",
-		];
-		if (!requestedTab) return;
-		// Legacy redirects: the old "Package Reports" and "Agent Queue" tabs were
-		// merged into a single "Agent Activity" tab in v2.0.3. Bookmarks shared
-		// in tickets / Slack should still land on something useful.
-		if (requestedTab === "history" || requestedTab === "queue") {
-			setActiveTab("activity");
-			return;
-		}
-		if (allowed.includes(requestedTab)) {
-			setActiveTab(requestedTab);
-		}
-	}, [location.state?.tab]);
-
-	// URL-driven tab redirects: handle ?tab=history and ?tab=queue arriving via
-	// direct links (not just from in-app navigation state). Rewrite the param so
-	// the URL reflects the canonical tab id.
-	useEffect(() => {
-		const urlTab = searchParams.get("tab");
-		if (urlTab === "history" || urlTab === "queue") {
-			setActiveTab("activity");
-			setSearchParams(
-				(prev) => {
-					const next = new URLSearchParams(prev);
-					next.set("tab", "activity");
-					return next;
-				},
-				{ replace: true },
-			);
-			return;
-		}
-		if (urlTab === "activity") {
-			setActiveTab("activity");
-		}
-	}, [searchParams, setSearchParams]);
-
 	// Auto-show credentials modal for new/pending hosts (skip if just arrived from Add Host wizard)
 	useEffect(() => {
 		if (host && host.status === "pending" && !location.state?.fromWizard) {
@@ -424,19 +344,20 @@ const HostDetail = () => {
 		}
 	}, [host]);
 
-	const isWindowsHost = (host?.os_type || host?.expected_platform || "")
-		.toLowerCase()
-		.includes("windows");
-	const isFreeBSDHost =
-		(host?.package_manager || "").toLowerCase() === "pkg" ||
-		(host?.os_type || host?.expected_platform || "")
-			.toLowerCase()
-			.includes("freebsd");
+	const isWindowsHost = hostIsWindows(host);
+	const remoteAccessTabs = getRemoteAccessTabs({
+		isWindowsHost,
+		canUseRemoteAccess: canUseRemoteAccess(),
+	});
+	const isFreeBSDHost = hostIsFreeBSD(host);
+	const showSELinux = showsSELinuxStatus(host);
 	const patchAllTitle = !wsStatus?.connected
 		? "Agent must be connected to patch"
-		: isFreeBSDHost
-			? "Run FreeBSD base-system and pkg updates on this host"
-			: "Run system package updates on this host";
+		: isWindowsHost
+			? "Install pending Windows updates and winget app upgrades on this host"
+			: isFreeBSDHost
+				? "Run FreeBSD base-system and pkg updates on this host"
+				: "Run system package updates on this host";
 
 	const deleteHostMutation = useMutation({
 		mutationFn: (hostId) => adminHostsAPI.delete(hostId),
@@ -465,6 +386,7 @@ const HostDetail = () => {
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["settings"] });
 			queryClient.invalidateQueries({ queryKey: ["serverUrl"] });
+			queryClient.invalidateQueries({ queryKey: ["serverUrlCorsCheck"] });
 		},
 	});
 
@@ -625,6 +547,21 @@ const HostDetail = () => {
 		},
 	});
 
+	const dockerImageCheckMutation = useMutation({
+		mutationFn: () =>
+			adminHostsAPI.checkDockerImages(hostId).then((res) => res.data),
+		onSuccess: () => {
+			toast.success(
+				"Update check requested. Results appear once the agent reports back.",
+			);
+		},
+		onError: (error) => {
+			toast.error(
+				error.response?.data?.error || "Failed to request an update check",
+			);
+		},
+	});
+
 	// Refresh Docker inventory mutation
 	const refreshDockerMutation = useMutation({
 		mutationFn: () =>
@@ -744,6 +681,21 @@ const HostDetail = () => {
 			!!integrationsData?.data?.integrations?.compliance &&
 			hasModule("compliance"),
 		retry: false, // Don't retry if compliance not enabled
+	});
+
+	const { data: complianceLastScan } = useQuery({
+		queryKey: ["compliance-latest", hostId, "last-scan"],
+		queryFn: () =>
+			complianceAPI
+				.getHostScans(hostId, { limit: 1 })
+				.then((res) => res.data?.scans?.[0] ?? null)
+				.catch(() => null),
+		staleTime: 2 * 60 * 1000,
+		enabled:
+			!!hostId &&
+			!!integrationsData?.data?.integrations?.compliance &&
+			hasModule("compliance"),
+		retry: false,
 	});
 
 	// Poll for compliance setup status only when compliance integration is enabled
@@ -1004,17 +956,12 @@ const HostDetail = () => {
 
 	// Refetch integrations when WebSocket status changes (e.g., after agent restart)
 	useEffect(() => {
-		if (
-			wsStatus?.connected &&
-			activeTab === "integrations" &&
-			integrationsData?.data?.connected === false
-		) {
+		if (wsStatus?.connected && integrationsData?.data?.connected === false) {
 			// Agent just reconnected, refetch integrations to get updated connection status
 			refetchIntegrations();
 		}
 	}, [
 		wsStatus?.connected,
-		activeTab,
 		integrationsData?.data?.connected,
 		refetchIntegrations,
 	]);
@@ -1075,11 +1022,24 @@ const HostDetail = () => {
 	const applyPendingConfigMutation = useMutation({
 		mutationFn: () =>
 			adminHostsAPI.applyPendingConfig(hostId).then((res) => res.data),
-		onSuccess: () => {
+		onSuccess: (data) => {
 			queryClient.invalidateQueries({
 				queryKey: ["host-integrations", hostId],
 			});
 			refetchIntegrations();
+			if (data?.scannerInstallQueued) {
+				setComplianceInstallJob({
+					status: "waiting",
+					progress: 0,
+					message: "Waiting for the agent to restart",
+					install_events: [],
+					error: null,
+				});
+				toast.success(
+					"Configuration applied. OpenSCAP will be installed once the agent has restarted.",
+				);
+				return;
+			}
 			toast.success(
 				"Configuration applied. Agent will update config.yml and restart.",
 			);
@@ -1257,6 +1217,587 @@ const HostDetail = () => {
 		}
 	};
 
+	const renderIntegrationsPanel = () => (
+		<div className="space-y-4">
+			{/* Header with refresh button */}
+			<div className="flex items-center justify-between">
+				<div className="flex items-center gap-2">
+					{integrationRefreshMessage.text && (
+						<span
+							className={`text-sm ${integrationRefreshMessage.isError ? "text-red-600 dark:text-red-400" : "text-green-600 dark:text-green-400"}`}
+						>
+							{integrationRefreshMessage.text}
+						</span>
+					)}
+				</div>
+				<button
+					type="button"
+					onClick={() => refreshIntegrationStatusMutation.mutate()}
+					disabled={
+						refreshIntegrationStatusMutation.isPending || !wsStatus?.connected
+					}
+					title={
+						wsStatus?.connected
+							? "Refresh integration status from agent"
+							: "Agent is not connected"
+					}
+					className="inline-flex items-center gap-1.5 min-h-[44px] md:min-h-0 px-3 py-1.5 text-sm font-medium text-secondary-700 dark:text-secondary-200 bg-secondary-100 dark:bg-secondary-700 hover:bg-secondary-200 dark:hover:bg-secondary-600 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+				>
+					<RefreshCw
+						className={`h-4 w-4 ${refreshIntegrationStatusMutation.isPending ? "animate-spin" : ""}`}
+					/>
+					{refreshIntegrationStatusMutation.isPending
+						? "Refreshing..."
+						: "Refresh Status"}
+				</button>
+			</div>
+			{isLoadingIntegrations ? (
+				<div className="flex items-center justify-center h-32">
+					<RefreshCw className="h-6 w-6 animate-spin text-primary-600" />
+				</div>
+			) : (
+				<div className="space-y-4">
+					{/* Pending configuration changes banner */}
+					{integrationsData?.pending_config_exists && (
+						<div className="rounded-lg border border-warning-300 dark:border-warning-600 bg-warning-50 dark:bg-warning-900/20 p-4">
+							<p className="text-sm font-medium text-warning-800 dark:text-warning-200">
+								Pending configuration changes - use the Apply button at the top
+								to send to agent
+							</p>
+							{!wsStatus?.connected && (
+								<p className="text-xs text-warning-600 dark:text-warning-400 mt-2">
+									Agent must be connected to apply pending configuration changes
+								</p>
+							)}
+						</div>
+					)}
+					<div className="grid grid-cols-1 gap-4">
+						{/* Docker Integration */}
+						<div className="bg-secondary-50 dark:bg-secondary-700 rounded-lg p-4 border border-secondary-200 dark:border-secondary-600">
+							<div className="flex items-start justify-between gap-4">
+								<div className="flex-1">
+									<div className="flex items-center gap-3 mb-2">
+										<Database className="h-5 w-5 text-primary-600 dark:text-primary-400" />
+										<h4 className="text-sm font-medium text-secondary-900 dark:text-white">
+											Docker
+										</h4>
+										{integrationsData?.data?.integrations?.docker ? (
+											<span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+												Enabled
+											</span>
+										) : (
+											<span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-400">
+												Disabled
+											</span>
+										)}
+									</div>
+									<p className="text-xs text-secondary-600 dark:text-white">
+										Monitor Docker containers, images, volumes, and networks.
+										Collects real-time container status events.
+									</p>
+								</div>
+								<div className="flex-shrink-0">
+									<button
+										type="button"
+										onClick={() =>
+											toggleIntegrationMutation.mutate({
+												integrationName: "docker",
+												enabled: !integrationsData?.data?.integrations?.docker,
+											})
+										}
+										disabled={toggleIntegrationMutation.isPending}
+										title={
+											integrationsData?.data?.integrations?.docker
+												? "Disable Docker integration"
+												: "Enable Docker integration"
+										}
+										className={`relative inline-flex h-5 w-9 items-center rounded-md transition-colors after:absolute after:-inset-3 after:content-[''] md:after:hidden focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 ${
+											integrationsData?.data?.integrations?.docker
+												? "bg-primary-600 dark:bg-primary-500"
+												: "bg-secondary-200 dark:bg-secondary-600"
+										} ${
+											toggleIntegrationMutation.isPending
+												? "opacity-50 cursor-not-allowed"
+												: ""
+										}`}
+									>
+										<span
+											className={`inline-block h-3 w-3 transform rounded-md bg-white transition-transform ${
+												integrationsData?.data?.integrations?.docker
+													? "translate-x-5"
+													: "translate-x-1"
+											}`}
+										/>
+									</button>
+								</div>
+							</div>
+							{!wsStatus?.connected &&
+								integrationsData?.pending_config_exists && (
+									<p className="text-xs text-warning-600 dark:text-warning-400 mt-2">
+										Agent must be connected to apply pending configuration
+										changes
+									</p>
+								)}
+							{toggleIntegrationMutation.isPending && (
+								<p className="text-xs text-secondary-600 dark:text-white mt-2">
+									Updating integration...
+								</p>
+							)}
+						</div>
+
+						{/* Compliance Integration */}
+						<div className="bg-secondary-50 dark:bg-secondary-700 rounded-lg p-4 border border-secondary-200 dark:border-secondary-600">
+							<div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+								<div className="flex-1">
+									<div className="flex items-center gap-3 mb-2">
+										<Shield className="h-5 w-5 text-primary-600 dark:text-primary-400" />
+										<h4 className="text-sm font-medium text-secondary-900 dark:text-white">
+											Compliance Scanning
+										</h4>
+										{integrationsData?.data?.integrations?.compliance ? (
+											<span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+												Enabled
+											</span>
+										) : (
+											<span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-400">
+												Disabled
+											</span>
+										)}
+									</div>
+									<p className="text-xs text-secondary-600 dark:text-white mb-2">
+										Run CIS benchmark compliance scans using OpenSCAP. Provides
+										security posture assessment and remediation recommendations.
+									</p>
+
+									{/* Setup Status Display - hide when compliance is off or status is "disabled" */}
+									{integrationsData?.data?.integrations?.compliance &&
+										complianceSetupStatus?.status?.status !== "disabled" && (
+											<div className="mt-3 p-3 rounded-lg border bg-secondary-100 dark:bg-secondary-800 border-secondary-300 dark:border-secondary-600">
+												{/* Installing State */}
+												{complianceSetupStatus?.status?.status ===
+													"installing" && (
+													<div className="space-y-2">
+														<div className="flex items-center gap-2">
+															<Loader2 className="h-4 w-4 animate-spin text-primary-600 dark:text-primary-400" />
+															<span className="text-sm font-medium text-primary-700 dark:text-primary-300">
+																Installing Compliance Tools
+															</span>
+														</div>
+														{complianceSetupStatus.status.install_events
+															?.length > 0 ? (
+															<ul className="space-y-1 mt-1">
+																{complianceSetupStatus.status.install_events.map(
+																	(evt) => (
+																		<li
+																			key={`${evt.message ?? ""}-${evt.status}-${evt.component ?? ""}`}
+																			className="flex items-center gap-2 text-xs"
+																		>
+																			{evt.status === "done" && (
+																				<CheckCircle2 className="h-3.5 w-3.5 text-green-500 dark:text-green-400 flex-shrink-0" />
+																			)}
+																			{evt.status === "in_progress" && (
+																				<Loader2 className="h-3.5 w-3.5 text-blue-500 dark:text-blue-400 animate-spin flex-shrink-0" />
+																			)}
+																			{evt.status === "failed" && (
+																				<AlertCircle className="h-3.5 w-3.5 text-red-500 dark:text-red-400 flex-shrink-0" />
+																			)}
+																			{evt.status === "skipped" && (
+																				<SkipForward className="h-3.5 w-3.5 text-secondary-400 flex-shrink-0" />
+																			)}
+																			<span
+																				className={
+																					evt.status === "done"
+																						? "text-green-700 dark:text-green-400"
+																						: evt.status === "in_progress"
+																							? "text-blue-700 dark:text-blue-400"
+																							: evt.status === "failed"
+																								? "text-red-700 dark:text-red-400"
+																								: "text-secondary-500 dark:text-white"
+																				}
+																			>
+																				{evt.message}
+																			</span>
+																		</li>
+																	),
+																)}
+															</ul>
+														) : (
+															<>
+																<div className="w-full bg-secondary-200 dark:bg-secondary-700 rounded-full h-1.5">
+																	<div
+																		className="bg-primary-600 h-1.5 rounded-full animate-pulse"
+																		style={{ width: "60%" }}
+																	/>
+																</div>
+																<p className="text-xs text-secondary-600 dark:text-white">
+																	{complianceSetupStatus.status.message ||
+																		"Installing OpenSCAP packages and security content..."}
+																</p>
+															</>
+														)}
+													</div>
+												)}
+
+												{/* Removing State */}
+												{complianceSetupStatus?.status?.status ===
+													"removing" && (
+													<div className="space-y-2">
+														<div className="flex items-center gap-2">
+															<RefreshCw className="h-4 w-4 animate-spin text-warning-600 dark:text-warning-400" />
+															<span className="text-sm font-medium text-warning-700 dark:text-warning-300">
+																Removing Compliance Tools
+															</span>
+														</div>
+														<div className="w-full bg-secondary-200 dark:bg-secondary-700 rounded-full h-1.5">
+															<div
+																className="bg-warning-500 h-1.5 rounded-full animate-pulse"
+																style={{ width: "40%" }}
+															/>
+														</div>
+														<p className="text-xs text-secondary-600 dark:text-white">
+															{complianceSetupStatus.status.message ||
+																"Removing OpenSCAP packages..."}
+														</p>
+													</div>
+												)}
+
+												{/* Ready State */}
+												{complianceSetupStatus?.status?.status === "ready" && (
+													<div className="flex items-center gap-2">
+														<CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400" />
+														<span className="text-sm font-medium text-green-700 dark:text-green-300">
+															Compliance Tools Ready
+														</span>
+														{complianceSetupStatus.status.components && (
+															<div className="flex flex-wrap gap-1 ml-2">
+																{Object.entries(
+																	complianceSetupStatus.status.components,
+																)
+																	.filter(
+																		([, status]) => status !== "unavailable",
+																	)
+																	.map(([name, _status]) => (
+																		<span
+																			key={name}
+																			className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300"
+																		>
+																			<CheckCircle2 className="h-3 w-3" />
+																			{name}
+																		</span>
+																	))}
+															</div>
+														)}
+													</div>
+												)}
+
+												{/* Partial State */}
+												{complianceSetupStatus?.status?.status ===
+													"partial" && (
+													<div className="space-y-2">
+														<div className="flex items-center gap-2">
+															<AlertTriangle className="h-4 w-4 text-warning-600 dark:text-warning-400" />
+															<span className="text-sm font-medium text-warning-700 dark:text-warning-300">
+																Partial Installation
+															</span>
+														</div>
+														<p className="text-xs text-secondary-600 dark:text-white">
+															{complianceSetupStatus.status.message ||
+																"Some components failed to install. Install OpenSCAP (and optionally Docker) on this host. See the Compliance Installation guide in the documentation."}
+														</p>
+														{complianceSetupStatus.status.components && (
+															<div className="flex flex-wrap gap-2">
+																{Object.entries(
+																	complianceSetupStatus.status.components,
+																)
+																	.filter(
+																		([, status]) => status !== "unavailable",
+																	)
+																	.map(([name, status]) => (
+																		<span
+																			key={name}
+																			className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs ${
+																				status === "ready"
+																					? "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300"
+																					: "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300"
+																			}`}
+																		>
+																			{status === "ready" ? (
+																				<CheckCircle2 className="h-3 w-3" />
+																			) : (
+																				<AlertCircle className="h-3 w-3" />
+																			)}
+																			{name}
+																		</span>
+																	))}
+															</div>
+														)}
+													</div>
+												)}
+
+												{/* Error State */}
+												{complianceSetupStatus?.status?.status === "error" && (
+													<div className="space-y-2">
+														<div className="flex items-center gap-2">
+															<AlertCircle className="h-4 w-4 text-danger-600 dark:text-danger-400" />
+															<span className="text-sm font-medium text-danger-700 dark:text-danger-300">
+																Installation Failed
+															</span>
+														</div>
+														<p className="text-xs text-danger-600 dark:text-danger-400">
+															{complianceSetupStatus?.status?.message ||
+																"Setup failed - check agent logs"}
+														</p>
+													</div>
+												)}
+
+												{/* Not ready / missing components: show actionable message */}
+												{complianceSetupStatus?.status?.status &&
+													![
+														"ready",
+														"installing",
+														"removing",
+														"partial",
+														"error",
+														"disabled",
+													].includes(complianceSetupStatus?.status?.status) && (
+														<div className="space-y-2">
+															<p className="text-sm text-secondary-700 dark:text-white">
+																Install OpenSCAP (and optionally Docker for
+																Docker Bench) on this host. Verify with{" "}
+																<code className="text-xs bg-secondary-200 dark:bg-secondary-700 px-1 rounded">
+																	oscap --version
+																</code>{" "}
+																and that SCAP content is present.
+															</p>
+															<p className="text-xs text-secondary-500 dark:text-white">
+																See the Compliance{" "}
+																<strong>Getting started</strong> or{" "}
+																<strong>Installation</strong> guide in the
+																documentation.
+															</p>
+														</div>
+													)}
+
+												{/* Fallback: Compliance enabled but no status in cache - assume ready */}
+												{!complianceSetupStatus?.status?.status &&
+													integrationsData?.data?.integrations?.compliance && (
+														<div className="flex items-center gap-2">
+															<CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400" />
+															<span className="text-sm font-medium text-green-700 dark:text-green-300">
+																Compliance Tools Ready
+															</span>
+														</div>
+													)}
+											</div>
+										)}
+								</div>
+								<div className="flex-shrink-0">
+									{/* Three-state compliance mode selector - small inline */}
+									{(() => {
+										const currentMode =
+											integrationsData?.data?.compliance_mode ||
+											integrationsData?.compliance_mode ||
+											(integrationsData?.data?.integrations?.compliance
+												? integrationsData?.data?.compliance_on_demand_only ||
+													integrationsData?.compliance_on_demand_only
+													? "on-demand"
+													: "enabled"
+												: "disabled");
+										const isDisabled =
+											setComplianceModeMutation.isPending ||
+											complianceSetupStatus?.status?.status === "installing" ||
+											complianceSetupStatus?.status?.status === "removing";
+
+										return (
+											<div className="flex md:flex-col gap-0.5 bg-secondary-100 dark:bg-secondary-800 rounded-md p-0.5">
+												<button
+													type="button"
+													onClick={() =>
+														setComplianceModeMutation.mutate("disabled")
+													}
+													disabled={isDisabled}
+													title={
+														isDisabled
+															? "Agent is not connected or operation in progress"
+															: "Disable compliance scanning"
+													}
+													className={`flex-1 md:flex-none w-full min-h-[44px] md:min-h-0 px-2 py-1 text-xs font-medium rounded transition-colors ${
+														currentMode === "disabled"
+															? "bg-white dark:bg-secondary-700 text-secondary-900 dark:text-secondary-100 shadow-sm"
+															: "text-secondary-600 dark:text-white hover:text-secondary-900 dark:hover:text-secondary-100"
+													} ${
+														isDisabled
+															? "opacity-50 cursor-not-allowed"
+															: "cursor-pointer"
+													}`}
+												>
+													Disabled
+												</button>
+												<button
+													type="button"
+													onClick={() =>
+														setComplianceModeMutation.mutate("on-demand")
+													}
+													disabled={isDisabled}
+													title={
+														isDisabled
+															? "Agent is not connected or operation in progress"
+															: "Enable compliance scanning (on-demand only - runs when triggered from UI)"
+													}
+													className={`flex-1 md:flex-none w-full min-h-[44px] md:min-h-0 px-2 py-1 text-xs font-medium rounded transition-colors ${
+														currentMode === "on-demand"
+															? "bg-white dark:bg-secondary-700 text-secondary-900 dark:text-secondary-100 shadow-sm"
+															: "text-secondary-600 dark:text-white hover:text-secondary-900 dark:hover:text-secondary-100"
+													} ${
+														isDisabled
+															? "opacity-50 cursor-not-allowed"
+															: "cursor-pointer"
+													}`}
+												>
+													On-Demand
+												</button>
+												<button
+													type="button"
+													onClick={() =>
+														setComplianceModeMutation.mutate("enabled")
+													}
+													disabled={isDisabled}
+													title={
+														isDisabled
+															? "Agent is not connected or operation in progress"
+															: "Enable compliance scanning with automatic scheduled scans"
+													}
+													className={`flex-1 md:flex-none w-full min-h-[44px] md:min-h-0 px-2 py-1 text-xs font-medium rounded transition-colors ${
+														currentMode === "enabled"
+															? "bg-white dark:bg-secondary-700 text-secondary-900 dark:text-secondary-100 shadow-sm"
+															: "text-secondary-600 dark:text-white hover:text-secondary-900 dark:hover:text-secondary-100"
+													} ${
+														isDisabled
+															? "opacity-50 cursor-not-allowed"
+															: "cursor-pointer"
+													}`}
+												>
+													Enabled
+												</button>
+											</div>
+										);
+									})()}
+								</div>
+							</div>
+							{!wsStatus?.connected && (
+								<p className="text-xs text-warning-600 dark:text-warning-400 mt-2">
+									Agent must be connected via WebSocket to change compliance
+									settings
+								</p>
+							)}
+							{/* Mode description */}
+							{(() => {
+								const currentMode =
+									integrationsData?.data?.compliance_mode ||
+									integrationsData?.compliance_mode ||
+									(integrationsData?.data?.integrations?.compliance
+										? integrationsData?.data?.compliance_on_demand_only ||
+											integrationsData?.compliance_on_demand_only
+											? "on-demand"
+											: "enabled"
+										: "disabled");
+								const modeDescriptions = {
+									disabled:
+										"Compliance scanning is disabled. No scans will run.",
+									"on-demand":
+										"Compliance scans only run when manually triggered from the UI, not during scheduled reports.",
+									enabled:
+										"Compliance scanning is enabled with automatic scheduled scans during regular reports.",
+								};
+								return (
+									<>
+										<p className="text-xs text-secondary-500 dark:text-white mt-2">
+											{modeDescriptions[currentMode] ||
+												modeDescriptions.disabled}
+										</p>
+										{currentMode === "disabled" &&
+											installedComplianceTools.length > 0 && (
+												<div className="mt-3 flex items-start gap-2 rounded-lg border border-warning-300 dark:border-warning-600 bg-warning-50 dark:bg-warning-900/20 p-3">
+													<AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0 text-warning-600 dark:text-warning-400" />
+													<p className="text-xs text-warning-800 dark:text-warning-200">
+														{compliance_tools_retained_text(
+															installedComplianceTools,
+														)}
+													</p>
+												</div>
+											)}
+									</>
+								);
+							})()}
+
+							{/* Individual scanner toggles */}
+							{integrationsData?.data?.integrations?.compliance && (
+								<div className="mt-3 pt-3 border-t border-secondary-200 dark:border-secondary-700 space-y-2">
+									<p className="text-xs font-medium text-secondary-600 dark:text-white">
+										Scanner Types
+									</p>
+									<label className="flex items-center justify-between gap-2 min-h-[44px] md:min-h-0 cursor-pointer">
+										<span className="text-xs text-secondary-700 dark:text-white">
+											OpenSCAP (CIS Benchmarks)
+										</span>
+										<input
+											type="checkbox"
+											checked={
+												integrationsData?.data?.compliance_openscap_enabled ??
+												integrationsData?.compliance_openscap_enabled ??
+												true
+											}
+											onChange={(e) => {
+												adminHostsAPI
+													.setComplianceScanners(hostId, {
+														openscap_enabled: e.target.checked,
+													})
+													.then(() => refetchIntegrations())
+													.catch(() => {});
+											}}
+											className="h-4 w-4 rounded border-secondary-300 text-primary-600 focus:ring-primary-500"
+										/>
+									</label>
+									<label className="flex items-center justify-between gap-2 min-h-[44px] md:min-h-0 cursor-pointer">
+										<div className="flex flex-col">
+											<span className="text-xs text-secondary-700 dark:text-white">
+												Docker Bench
+											</span>
+											{!integrationsData?.data?.integrations?.docker && (
+												<span className="text-[10px] text-secondary-400">
+													Docker integration not enabled
+												</span>
+											)}
+										</div>
+										<input
+											type="checkbox"
+											checked={
+												integrationsData?.data
+													?.compliance_docker_bench_enabled ??
+												integrationsData?.compliance_docker_bench_enabled ??
+												false
+											}
+											disabled={!integrationsData?.data?.integrations?.docker}
+											onChange={(e) => {
+												adminHostsAPI
+													.setComplianceScanners(hostId, {
+														docker_bench_enabled: e.target.checked,
+													})
+													.then(() => refetchIntegrations())
+													.catch(() => {});
+											}}
+											className="h-4 w-4 rounded border-secondary-300 text-primary-600 focus:ring-primary-500 disabled:opacity-40"
+										/>
+									</label>
+								</div>
+							)}
+						</div>
+					</div>
+				</div>
+			)}
+		</div>
+	);
+
 	if (isLoading) {
 		return (
 			<div className="flex items-center justify-center h-64">
@@ -1427,7 +1968,7 @@ const HostDetail = () => {
 							<span className="hidden sm:inline">Fetch Report</span>
 							<span className="sm:hidden">Fetch</span>
 						</button>
-						{canManageHosts() && !isWindowsHost && (
+						{canManageHosts() && (
 							<button
 								type="button"
 								onClick={() => setShowPatchConfirmModal(true)}
@@ -1487,6 +2028,12 @@ const HostDetail = () => {
 					</div>
 				</div>
 			</div>
+
+			<HostIdentityBanners
+				host={host}
+				canManage={canManageHosts()}
+				onRegenerateCredentials={() => setShowCredentialsModal(true)}
+			/>
 
 			{/* Package Statistics Cards */}
 			<div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
@@ -1657,10 +2204,15 @@ const HostDetail = () => {
 									</p>
 									<button
 										type="button"
-										onClick={() => handleTabChange("integrations")}
-										className="text-sm text-primary-600 dark:text-primary-400 hover:underline"
+										onClick={() =>
+											mobileIntegrationsRef.current?.scrollIntoView({
+												behavior: "smooth",
+												block: "start",
+											})
+										}
+										className="inline-flex items-center min-h-[44px] text-sm text-primary-600 dark:text-primary-400 hover:underline"
 									>
-										Manage in Integrations tab
+										Manage integrations
 									</button>
 								</div>
 
@@ -1680,9 +2232,19 @@ const HostDetail = () => {
 									<p className="text-xs text-secondary-500 dark:text-white mb-1.5">
 										Agent Version
 									</p>
-									<p className="font-medium text-secondary-900 dark:text-white text-sm">
-										{host.agent_version || "Unknown"}
+									<div className="flex items-center gap-1.5 font-medium text-secondary-900 dark:text-white text-sm">
+										<span>{host.agent_version || "Unknown"}</span>
+										<AgentVersionIndicators host={host} />
+									</div>
+								</div>
+
+								<div>
+									<p className="text-xs text-secondary-500 dark:text-white mb-1.5">
+										Config Version
 									</p>
+									<div className="font-medium text-secondary-900 dark:text-white text-sm">
+										<ConfigVersionValue host={host} />
+									</div>
 								</div>
 
 								<div>
@@ -1959,9 +2521,7 @@ const HostDetail = () => {
 						</h3>
 						<div className="space-y-4">
 							{/* System Information */}
-							{(host.kernel_version ||
-								host.selinux_status ||
-								host.architecture) && (
+							{(host.kernel_version || showSELinux || host.architecture) && (
 								<div>
 									<h4 className="text-sm font-medium text-secondary-900 dark:text-white mb-3 flex items-center gap-2">
 										<Terminal className="h-4 w-4 text-primary-600 dark:text-primary-400" />
@@ -2001,7 +2561,7 @@ const HostDetail = () => {
 											</div>
 										)}
 
-										{host.selinux_status && (
+										{showSELinux && (
 											<div>
 												<p className="text-xs text-secondary-500 dark:text-white">
 													SELinux Status
@@ -2137,7 +2697,7 @@ const HostDetail = () => {
 													<div className="space-y-3 max-h-80 overflow-y-auto pr-2">
 														{host.disk_details.map((disk, index) => (
 															<div
-																key={disk.name || `disk-${index}`}
+																key={`${disk.name ?? ""}-${disk.mountpoint ?? index}`}
 																className="bg-secondary-50 dark:bg-secondary-700 p-3 rounded-lg"
 															>
 																<div className="flex items-center gap-2 mb-2">
@@ -2184,7 +2744,7 @@ const HostDetail = () => {
 
 							{/* No Data State */}
 							{!host.kernel_version &&
-								!host.selinux_status &&
+								!showSELinux &&
 								!host.architecture &&
 								!host.boot_time &&
 								!host.system_uptime &&
@@ -2278,83 +2838,11 @@ const HostDetail = () => {
 					</div>
 
 					{/* Integrations Card */}
-					<div className="card p-4">
+					<div ref={mobileIntegrationsRef} className="card p-4 scroll-mt-20">
 						<h3 className="text-lg font-semibold text-secondary-900 dark:text-white mb-4">
 							Integrations
 						</h3>
-						{isLoadingIntegrations ? (
-							<div className="flex items-center justify-center h-32">
-								<RefreshCw className="h-6 w-6 animate-spin text-primary-600" />
-							</div>
-						) : (
-							<div className="space-y-4">
-								<div className="bg-secondary-50 dark:bg-secondary-700 rounded-lg p-4 border border-secondary-200 dark:border-secondary-600">
-									<div className="flex items-start justify-between gap-4">
-										<div className="flex-1">
-											<div className="flex items-center gap-3 mb-2">
-												<Database className="h-5 w-5 text-primary-600 dark:text-primary-400" />
-												<h4 className="text-sm font-medium text-secondary-900 dark:text-white">
-													Docker
-												</h4>
-												{integrationsData?.data?.integrations?.docker ? (
-													<span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
-														Enabled
-													</span>
-												) : (
-													<span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-400">
-														Disabled
-													</span>
-												)}
-											</div>
-											<p className="text-xs text-secondary-600 dark:text-white">
-												Monitor Docker containers, images, volumes, and
-												networks.
-											</p>
-										</div>
-										<div className="flex-shrink-0">
-											<button
-												type="button"
-												onClick={() =>
-													toggleIntegrationMutation.mutate({
-														integrationName: "docker",
-														enabled:
-															!integrationsData?.data?.integrations?.docker,
-													})
-												}
-												disabled={
-													toggleIntegrationMutation.isPending ||
-													!wsStatus?.connected
-												}
-												className={`relative inline-flex h-5 w-9 items-center rounded-md transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 ${
-													integrationsData?.data?.integrations?.docker
-														? "bg-primary-600 dark:bg-primary-500"
-														: "bg-secondary-200 dark:bg-secondary-600"
-												} ${
-													toggleIntegrationMutation.isPending ||
-													!integrationsData?.data?.connected
-														? "opacity-50 cursor-not-allowed"
-														: ""
-												}`}
-											>
-												<span
-													className={`inline-block h-3 w-3 transform rounded-md bg-white transition-transform ${
-														integrationsData?.data?.integrations?.docker
-															? "translate-x-5"
-															: "translate-x-1"
-													}`}
-												/>
-											</button>
-										</div>
-									</div>
-									{!wsStatus?.connected && (
-										<p className="text-xs text-warning-600 dark:text-warning-400 mt-2">
-											Agent must be connected via WebSocket to toggle
-											integrations
-										</p>
-									)}
-								</div>
-							</div>
-						)}
+						{renderIntegrationsPanel()}
 					</div>
 
 					{/* Reporting Card */}
@@ -2625,21 +3113,23 @@ const HostDetail = () => {
 								)}
 							</button>
 						)}
-						<button
-							type="button"
-							onClick={() => handleTabChange("terminal")}
-							className={`px-4 py-2 text-sm font-medium inline-flex items-center gap-2 ${
-								activeTab === "terminal"
-									? "text-primary-600 dark:text-primary-400 border-b-2 border-primary-500"
-									: "text-secondary-500 dark:text-white hover:text-secondary-700 dark:hover:text-primary-400"
-							}`}
-						>
-							Terminal
-							{!hasModule("ssh_terminal") && (
-								<TierBadge tier={getRequiredTier("ssh_terminal")} />
-							)}
-						</button>
-						{isWindowsHost && (
+						{remoteAccessTabs.terminal && (
+							<button
+								type="button"
+								onClick={() => handleTabChange("terminal")}
+								className={`px-4 py-2 text-sm font-medium inline-flex items-center gap-2 ${
+									activeTab === "terminal"
+										? "text-primary-600 dark:text-primary-400 border-b-2 border-primary-500"
+										: "text-secondary-500 dark:text-white hover:text-secondary-700 dark:hover:text-primary-400"
+								}`}
+							>
+								Terminal
+								{!hasModule("ssh_terminal") && (
+									<TierBadge tier={getRequiredTier("ssh_terminal")} />
+								)}
+							</button>
+						)}
+						{remoteAccessTabs.rdp && (
 							<button
 								type="button"
 								onClick={() => handleTabChange("rdp")}
@@ -2708,7 +3198,10 @@ const HostDetail = () => {
 											validate={(value) => {
 												if (
 													value.trim() &&
-													!/^(\d{1,3}\.){3}\d{1,3}$/.test(value.trim())
+													!/^(\d{1,3}\.){3}\d{1,3}$/.test(value.trim()) &&
+													!/^(?=.*:.*:)[0-9a-fA-F:]+(\d{1,3}(\.\d{1,3}){3})?$/.test(
+														value.trim(),
+													)
 												) {
 													return "Invalid IP address format";
 												}
@@ -2807,9 +3300,19 @@ const HostDetail = () => {
 										<p className="text-xs text-secondary-500 dark:text-white mb-1.5">
 											Agent Version
 										</p>
-										<p className="font-medium text-secondary-900 dark:text-white text-sm">
-											{host.agent_version || "Unknown"}
+										<div className="flex items-center gap-1.5 font-medium text-secondary-900 dark:text-white text-sm">
+											<span>{host.agent_version || "Unknown"}</span>
+											<AgentVersionIndicators host={host} />
+										</div>
+									</div>
+
+									<div>
+										<p className="text-xs text-secondary-500 dark:text-white mb-1.5">
+											Config Version
 										</p>
+										<div className="font-medium text-secondary-900 dark:text-white text-sm">
+											<ConfigVersionValue host={host} />
+										</div>
 									</div>
 
 									<div>
@@ -3085,7 +3588,7 @@ const HostDetail = () => {
 							<div className="space-y-6">
 								{/* Basic System Information */}
 								{(host.kernel_version ||
-									host.selinux_status ||
+									showSELinux ||
 									host.architecture ||
 									host.package_manager) && (
 									<div>
@@ -3127,7 +3630,7 @@ const HostDetail = () => {
 												</div>
 											)}
 
-											{host.selinux_status && (
+											{showSELinux && (
 												<div>
 													<p className="text-xs text-secondary-500 dark:text-white">
 														SELinux Status
@@ -3302,7 +3805,7 @@ const HostDetail = () => {
 													<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-h-80 overflow-y-auto pr-2">
 														{host.disk_details.map((disk, index) => (
 															<div
-																key={disk.name || `disk-${index}`}
+																key={`${disk.name ?? ""}-${disk.mountpoint ?? index}`}
 																className="bg-secondary-50 dark:bg-secondary-700 p-3 rounded-lg"
 															>
 																<div className="flex items-center gap-2 mb-2">
@@ -3348,7 +3851,7 @@ const HostDetail = () => {
 
 								{/* No Data State */}
 								{!host.kernel_version &&
-									!host.selinux_status &&
+									!showSELinux &&
 									!host.architecture &&
 									!host.boot_time &&
 									!host.system_uptime &&
@@ -3400,7 +3903,7 @@ const HostDetail = () => {
 						    isn't in the tenant's plan, render the upgrade content
 						    instead so the tab is discoverable rather than silently
 						    broken. Backend ticket endpoints still return 403. */}
-						{host && hasModule("ssh_terminal") && (
+						{host && remoteAccessTabs.terminal && hasModule("ssh_terminal") && (
 							<div className={activeTab === "terminal" ? "" : "hidden"}>
 								<SshTerminal
 									host={host}
@@ -3410,19 +3913,26 @@ const HostDetail = () => {
 								/>
 							</div>
 						)}
-						{activeTab === "terminal" && !hasModule("ssh_terminal") && (
-							<UpgradeRequiredContent module="ssh_terminal" variant="inline" />
-						)}
+						{activeTab === "terminal" &&
+							remoteAccessTabs.terminal &&
+							!hasModule("ssh_terminal") && (
+								<UpgradeRequiredContent
+									module="ssh_terminal"
+									variant="inline"
+								/>
+							)}
 
 						{/* RDP - Windows hosts only. Gated by the rdp module (Max tier). */}
-						{host && isWindowsHost && hasModule("rdp") && (
+						{host && remoteAccessTabs.rdp && hasModule("rdp") && (
 							<div className={activeTab === "rdp" ? "" : "hidden"}>
 								<RdpViewer host={host} isOpen={activeTab === "rdp"} />
 							</div>
 						)}
-						{activeTab === "rdp" && isWindowsHost && !hasModule("rdp") && (
-							<UpgradeRequiredContent module="rdp" variant="inline" />
-						)}
+						{activeTab === "rdp" &&
+							remoteAccessTabs.rdp &&
+							!hasModule("rdp") && (
+								<UpgradeRequiredContent module="rdp" variant="inline" />
+							)}
 
 						{/* Notes */}
 						{activeTab === "notes" && (
@@ -3502,626 +4012,7 @@ const HostDetail = () => {
 						)}
 
 						{/* Integrations */}
-						{activeTab === "integrations" && (
-							<div className="space-y-4">
-								{/* Header with refresh button */}
-								<div className="flex items-center justify-between">
-									<div className="flex items-center gap-2">
-										{integrationRefreshMessage.text && (
-											<span
-												className={`text-sm ${integrationRefreshMessage.isError ? "text-red-600 dark:text-red-400" : "text-green-600 dark:text-green-400"}`}
-											>
-												{integrationRefreshMessage.text}
-											</span>
-										)}
-									</div>
-									<button
-										type="button"
-										onClick={() => refreshIntegrationStatusMutation.mutate()}
-										disabled={
-											refreshIntegrationStatusMutation.isPending ||
-											!wsStatus?.connected
-										}
-										title={
-											wsStatus?.connected
-												? "Refresh integration status from agent"
-												: "Agent is not connected"
-										}
-										className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-secondary-700 dark:text-secondary-200 bg-secondary-100 dark:bg-secondary-700 hover:bg-secondary-200 dark:hover:bg-secondary-600 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-									>
-										<RefreshCw
-											className={`h-4 w-4 ${refreshIntegrationStatusMutation.isPending ? "animate-spin" : ""}`}
-										/>
-										{refreshIntegrationStatusMutation.isPending
-											? "Refreshing..."
-											: "Refresh Status"}
-									</button>
-								</div>
-								{isLoadingIntegrations ? (
-									<div className="flex items-center justify-center h-32">
-										<RefreshCw className="h-6 w-6 animate-spin text-primary-600" />
-									</div>
-								) : (
-									<div className="space-y-4">
-										{/* Pending configuration changes banner */}
-										{integrationsData?.pending_config_exists && (
-											<div className="rounded-lg border border-warning-300 dark:border-warning-600 bg-warning-50 dark:bg-warning-900/20 p-4">
-												<p className="text-sm font-medium text-warning-800 dark:text-warning-200">
-													Pending configuration changes - use the Apply button
-													at the top to send to agent
-												</p>
-												{!wsStatus?.connected && (
-													<p className="text-xs text-warning-600 dark:text-warning-400 mt-2">
-														Agent must be connected to apply pending
-														configuration changes
-													</p>
-												)}
-											</div>
-										)}
-										<div className="grid grid-cols-1 gap-4">
-											{/* Docker Integration */}
-											<div className="bg-secondary-50 dark:bg-secondary-700 rounded-lg p-4 border border-secondary-200 dark:border-secondary-600">
-												<div className="flex items-start justify-between gap-4">
-													<div className="flex-1">
-														<div className="flex items-center gap-3 mb-2">
-															<Database className="h-5 w-5 text-primary-600 dark:text-primary-400" />
-															<h4 className="text-sm font-medium text-secondary-900 dark:text-white">
-																Docker
-															</h4>
-															{integrationsData?.data?.integrations?.docker ? (
-																<span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
-																	Enabled
-																</span>
-															) : (
-																<span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-400">
-																	Disabled
-																</span>
-															)}
-														</div>
-														<p className="text-xs text-secondary-600 dark:text-white">
-															Monitor Docker containers, images, volumes, and
-															networks. Collects real-time container status
-															events.
-														</p>
-													</div>
-													<div className="flex-shrink-0">
-														<button
-															type="button"
-															onClick={() =>
-																toggleIntegrationMutation.mutate({
-																	integrationName: "docker",
-																	enabled:
-																		!integrationsData?.data?.integrations
-																			?.docker,
-																})
-															}
-															disabled={toggleIntegrationMutation.isPending}
-															title={
-																integrationsData?.data?.integrations?.docker
-																	? "Disable Docker integration"
-																	: "Enable Docker integration"
-															}
-															className={`relative inline-flex h-5 w-9 items-center rounded-md transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 ${
-																integrationsData?.data?.integrations?.docker
-																	? "bg-primary-600 dark:bg-primary-500"
-																	: "bg-secondary-200 dark:bg-secondary-600"
-															} ${
-																toggleIntegrationMutation.isPending
-																	? "opacity-50 cursor-not-allowed"
-																	: ""
-															}`}
-														>
-															<span
-																className={`inline-block h-3 w-3 transform rounded-md bg-white transition-transform ${
-																	integrationsData?.data?.integrations?.docker
-																		? "translate-x-5"
-																		: "translate-x-1"
-																}`}
-															/>
-														</button>
-													</div>
-												</div>
-												{!wsStatus?.connected &&
-													integrationsData?.pending_config_exists && (
-														<p className="text-xs text-warning-600 dark:text-warning-400 mt-2">
-															Agent must be connected to apply pending
-															configuration changes
-														</p>
-													)}
-												{toggleIntegrationMutation.isPending && (
-													<p className="text-xs text-secondary-600 dark:text-white mt-2">
-														Updating integration...
-													</p>
-												)}
-											</div>
-
-											{/* Compliance Integration */}
-											<div className="bg-secondary-50 dark:bg-secondary-700 rounded-lg p-4 border border-secondary-200 dark:border-secondary-600">
-												<div className="flex items-start justify-between gap-4">
-													<div className="flex-1">
-														<div className="flex items-center gap-3 mb-2">
-															<Shield className="h-5 w-5 text-primary-600 dark:text-primary-400" />
-															<h4 className="text-sm font-medium text-secondary-900 dark:text-white">
-																Compliance Scanning
-															</h4>
-															{integrationsData?.data?.integrations
-																?.compliance ? (
-																<span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
-																	Enabled
-																</span>
-															) : (
-																<span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-400">
-																	Disabled
-																</span>
-															)}
-														</div>
-														<p className="text-xs text-secondary-600 dark:text-white mb-2">
-															Run CIS benchmark compliance scans using OpenSCAP.
-															Provides security posture assessment and
-															remediation recommendations.
-														</p>
-
-														{/* Setup Status Display - hide when compliance is off or status is "disabled" */}
-														{integrationsData?.data?.integrations?.compliance &&
-															complianceSetupStatus?.status?.status !==
-																"disabled" && (
-																<div className="mt-3 p-3 rounded-lg border bg-secondary-100 dark:bg-secondary-800 border-secondary-300 dark:border-secondary-600">
-																	{/* Installing State */}
-																	{complianceSetupStatus?.status?.status ===
-																		"installing" && (
-																		<div className="space-y-2">
-																			<div className="flex items-center gap-2">
-																				<Loader2 className="h-4 w-4 animate-spin text-primary-600 dark:text-primary-400" />
-																				<span className="text-sm font-medium text-primary-700 dark:text-primary-300">
-																					Installing Compliance Tools
-																				</span>
-																			</div>
-																			{complianceSetupStatus.status
-																				.install_events?.length > 0 ? (
-																				<ul className="space-y-1 mt-1">
-																					{complianceSetupStatus.status.install_events.map(
-																						(evt) => (
-																							<li
-																								key={`${evt.message ?? ""}-${evt.status}-${evt.component ?? ""}`}
-																								className="flex items-center gap-2 text-xs"
-																							>
-																								{evt.status === "done" && (
-																									<CheckCircle2 className="h-3.5 w-3.5 text-green-500 dark:text-green-400 flex-shrink-0" />
-																								)}
-																								{evt.status ===
-																									"in_progress" && (
-																									<Loader2 className="h-3.5 w-3.5 text-blue-500 dark:text-blue-400 animate-spin flex-shrink-0" />
-																								)}
-																								{evt.status === "failed" && (
-																									<AlertCircle className="h-3.5 w-3.5 text-red-500 dark:text-red-400 flex-shrink-0" />
-																								)}
-																								{evt.status === "skipped" && (
-																									<SkipForward className="h-3.5 w-3.5 text-secondary-400 flex-shrink-0" />
-																								)}
-																								<span
-																									className={
-																										evt.status === "done"
-																											? "text-green-700 dark:text-green-400"
-																											: evt.status ===
-																													"in_progress"
-																												? "text-blue-700 dark:text-blue-400"
-																												: evt.status ===
-																														"failed"
-																													? "text-red-700 dark:text-red-400"
-																													: "text-secondary-500 dark:text-white"
-																									}
-																								>
-																									{evt.message}
-																								</span>
-																							</li>
-																						),
-																					)}
-																				</ul>
-																			) : (
-																				<>
-																					<div className="w-full bg-secondary-200 dark:bg-secondary-700 rounded-full h-1.5">
-																						<div
-																							className="bg-primary-600 h-1.5 rounded-full animate-pulse"
-																							style={{ width: "60%" }}
-																						/>
-																					</div>
-																					<p className="text-xs text-secondary-600 dark:text-white">
-																						{complianceSetupStatus.status
-																							.message ||
-																							"Installing OpenSCAP packages and security content..."}
-																					</p>
-																				</>
-																			)}
-																		</div>
-																	)}
-
-																	{/* Removing State */}
-																	{complianceSetupStatus?.status?.status ===
-																		"removing" && (
-																		<div className="space-y-2">
-																			<div className="flex items-center gap-2">
-																				<RefreshCw className="h-4 w-4 animate-spin text-warning-600 dark:text-warning-400" />
-																				<span className="text-sm font-medium text-warning-700 dark:text-warning-300">
-																					Removing Compliance Tools
-																				</span>
-																			</div>
-																			<div className="w-full bg-secondary-200 dark:bg-secondary-700 rounded-full h-1.5">
-																				<div
-																					className="bg-warning-500 h-1.5 rounded-full animate-pulse"
-																					style={{ width: "40%" }}
-																				/>
-																			</div>
-																			<p className="text-xs text-secondary-600 dark:text-white">
-																				{complianceSetupStatus.status.message ||
-																					"Removing OpenSCAP packages..."}
-																			</p>
-																		</div>
-																	)}
-
-																	{/* Ready State */}
-																	{complianceSetupStatus?.status?.status ===
-																		"ready" && (
-																		<div className="flex items-center gap-2">
-																			<CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400" />
-																			<span className="text-sm font-medium text-green-700 dark:text-green-300">
-																				Compliance Tools Ready
-																			</span>
-																			{complianceSetupStatus.status
-																				.components && (
-																				<div className="flex gap-1 ml-2">
-																					{Object.entries(
-																						complianceSetupStatus.status
-																							.components,
-																					)
-																						.filter(
-																							([, status]) =>
-																								status !== "unavailable",
-																						)
-																						.map(([name, _status]) => (
-																							<span
-																								key={name}
-																								className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300"
-																							>
-																								<CheckCircle2 className="h-3 w-3" />
-																								{name}
-																							</span>
-																						))}
-																				</div>
-																			)}
-																		</div>
-																	)}
-
-																	{/* Partial State */}
-																	{complianceSetupStatus?.status?.status ===
-																		"partial" && (
-																		<div className="space-y-2">
-																			<div className="flex items-center gap-2">
-																				<AlertTriangle className="h-4 w-4 text-warning-600 dark:text-warning-400" />
-																				<span className="text-sm font-medium text-warning-700 dark:text-warning-300">
-																					Partial Installation
-																				</span>
-																			</div>
-																			<p className="text-xs text-secondary-600 dark:text-white">
-																				{complianceSetupStatus.status.message ||
-																					"Some components failed to install. Install OpenSCAP (and optionally Docker) on this host. See the Compliance Installation guide in the documentation."}
-																			</p>
-																			{complianceSetupStatus.status
-																				.components && (
-																				<div className="flex flex-wrap gap-2">
-																					{Object.entries(
-																						complianceSetupStatus.status
-																							.components,
-																					)
-																						.filter(
-																							([, status]) =>
-																								status !== "unavailable",
-																						)
-																						.map(([name, status]) => (
-																							<span
-																								key={name}
-																								className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs ${
-																									status === "ready"
-																										? "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300"
-																										: "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300"
-																								}`}
-																							>
-																								{status === "ready" ? (
-																									<CheckCircle2 className="h-3 w-3" />
-																								) : (
-																									<AlertCircle className="h-3 w-3" />
-																								)}
-																								{name}
-																							</span>
-																						))}
-																				</div>
-																			)}
-																		</div>
-																	)}
-
-																	{/* Error State */}
-																	{complianceSetupStatus?.status?.status ===
-																		"error" && (
-																		<div className="space-y-2">
-																			<div className="flex items-center gap-2">
-																				<AlertCircle className="h-4 w-4 text-danger-600 dark:text-danger-400" />
-																				<span className="text-sm font-medium text-danger-700 dark:text-danger-300">
-																					Installation Failed
-																				</span>
-																			</div>
-																			<p className="text-xs text-danger-600 dark:text-danger-400">
-																				{complianceSetupStatus?.status
-																					?.message ||
-																					"Setup failed - check agent logs"}
-																			</p>
-																		</div>
-																	)}
-
-																	{/* Not ready / missing components: show actionable message */}
-																	{complianceSetupStatus?.status?.status &&
-																		![
-																			"ready",
-																			"installing",
-																			"removing",
-																			"partial",
-																			"error",
-																			"disabled",
-																		].includes(
-																			complianceSetupStatus?.status?.status,
-																		) && (
-																			<div className="space-y-2">
-																				<p className="text-sm text-secondary-700 dark:text-white">
-																					Install OpenSCAP (and optionally
-																					Docker for Docker Bench) on this host.
-																					Verify with{" "}
-																					<code className="text-xs bg-secondary-200 dark:bg-secondary-700 px-1 rounded">
-																						oscap --version
-																					</code>{" "}
-																					and that SCAP content is present.
-																				</p>
-																				<p className="text-xs text-secondary-500 dark:text-white">
-																					See the Compliance{" "}
-																					<strong>Getting started</strong> or{" "}
-																					<strong>Installation</strong> guide in
-																					the documentation.
-																				</p>
-																			</div>
-																		)}
-
-																	{/* Fallback: Compliance enabled but no status in cache - assume ready */}
-																	{!complianceSetupStatus?.status?.status &&
-																		integrationsData?.data?.integrations
-																			?.compliance && (
-																			<div className="flex items-center gap-2">
-																				<CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400" />
-																				<span className="text-sm font-medium text-green-700 dark:text-green-300">
-																					Compliance Tools Ready
-																				</span>
-																			</div>
-																		)}
-																</div>
-															)}
-													</div>
-													<div className="flex-shrink-0">
-														{/* Three-state compliance mode selector - small inline */}
-														{(() => {
-															const currentMode =
-																integrationsData?.data?.compliance_mode ||
-																integrationsData?.compliance_mode ||
-																(integrationsData?.data?.integrations
-																	?.compliance
-																	? integrationsData?.data
-																			?.compliance_on_demand_only ||
-																		integrationsData?.compliance_on_demand_only
-																		? "on-demand"
-																		: "enabled"
-																	: "disabled");
-															const isDisabled =
-																setComplianceModeMutation.isPending ||
-																complianceSetupStatus?.status?.status ===
-																	"installing" ||
-																complianceSetupStatus?.status?.status ===
-																	"removing";
-
-															return (
-																<div className="flex flex-col gap-0.5 bg-secondary-100 dark:bg-secondary-800 rounded-md p-0.5">
-																	<button
-																		type="button"
-																		onClick={() =>
-																			setComplianceModeMutation.mutate(
-																				"disabled",
-																			)
-																		}
-																		disabled={isDisabled}
-																		title={
-																			isDisabled
-																				? "Agent is not connected or operation in progress"
-																				: "Disable compliance scanning"
-																		}
-																		className={`w-full px-2 py-1 text-xs font-medium rounded transition-colors ${
-																			currentMode === "disabled"
-																				? "bg-white dark:bg-secondary-700 text-secondary-900 dark:text-secondary-100 shadow-sm"
-																				: "text-secondary-600 dark:text-white hover:text-secondary-900 dark:hover:text-secondary-100"
-																		} ${
-																			isDisabled
-																				? "opacity-50 cursor-not-allowed"
-																				: "cursor-pointer"
-																		}`}
-																	>
-																		Disabled
-																	</button>
-																	<button
-																		type="button"
-																		onClick={() =>
-																			setComplianceModeMutation.mutate(
-																				"on-demand",
-																			)
-																		}
-																		disabled={isDisabled}
-																		title={
-																			isDisabled
-																				? "Agent is not connected or operation in progress"
-																				: "Enable compliance scanning (on-demand only - runs when triggered from UI)"
-																		}
-																		className={`w-full px-2 py-1 text-xs font-medium rounded transition-colors ${
-																			currentMode === "on-demand"
-																				? "bg-white dark:bg-secondary-700 text-secondary-900 dark:text-secondary-100 shadow-sm"
-																				: "text-secondary-600 dark:text-white hover:text-secondary-900 dark:hover:text-secondary-100"
-																		} ${
-																			isDisabled
-																				? "opacity-50 cursor-not-allowed"
-																				: "cursor-pointer"
-																		}`}
-																	>
-																		On-Demand
-																	</button>
-																	<button
-																		type="button"
-																		onClick={() =>
-																			setComplianceModeMutation.mutate(
-																				"enabled",
-																			)
-																		}
-																		disabled={isDisabled}
-																		title={
-																			isDisabled
-																				? "Agent is not connected or operation in progress"
-																				: "Enable compliance scanning with automatic scheduled scans"
-																		}
-																		className={`w-full px-2 py-1 text-xs font-medium rounded transition-colors ${
-																			currentMode === "enabled"
-																				? "bg-white dark:bg-secondary-700 text-secondary-900 dark:text-secondary-100 shadow-sm"
-																				: "text-secondary-600 dark:text-white hover:text-secondary-900 dark:hover:text-secondary-100"
-																		} ${
-																			isDisabled
-																				? "opacity-50 cursor-not-allowed"
-																				: "cursor-pointer"
-																		}`}
-																	>
-																		Enabled
-																	</button>
-																</div>
-															);
-														})()}
-													</div>
-												</div>
-												{!wsStatus?.connected && (
-													<p className="text-xs text-warning-600 dark:text-warning-400 mt-2">
-														Agent must be connected via WebSocket to change
-														compliance settings
-													</p>
-												)}
-												{/* Mode description */}
-												{(() => {
-													const currentMode =
-														integrationsData?.data?.compliance_mode ||
-														integrationsData?.compliance_mode ||
-														(integrationsData?.data?.integrations?.compliance
-															? integrationsData?.data
-																	?.compliance_on_demand_only ||
-																integrationsData?.compliance_on_demand_only
-																? "on-demand"
-																: "enabled"
-															: "disabled");
-													const modeDescriptions = {
-														disabled:
-															"Compliance scanning is disabled. No scans will run.",
-														"on-demand":
-															"Compliance scans only run when manually triggered from the UI, not during scheduled reports.",
-														enabled:
-															"Compliance scanning is enabled with automatic scheduled scans during regular reports.",
-													};
-													return (
-														<>
-															<p className="text-xs text-secondary-500 dark:text-white mt-2">
-																{modeDescriptions[currentMode] ||
-																	modeDescriptions.disabled}
-															</p>
-															{currentMode === "disabled" &&
-																installedComplianceTools.length > 0 && (
-																	<div className="mt-3 flex items-start gap-2 rounded-lg border border-warning-300 dark:border-warning-600 bg-warning-50 dark:bg-warning-900/20 p-3">
-																		<AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0 text-warning-600 dark:text-warning-400" />
-																		<p className="text-xs text-warning-800 dark:text-warning-200">
-																			{compliance_tools_retained_text(
-																				installedComplianceTools,
-																			)}
-																		</p>
-																	</div>
-																)}
-														</>
-													);
-												})()}
-
-												{/* Individual scanner toggles */}
-												{integrationsData?.data?.integrations?.compliance && (
-													<div className="mt-3 pt-3 border-t border-secondary-200 dark:border-secondary-700 space-y-2">
-														<p className="text-xs font-medium text-secondary-600 dark:text-white">
-															Scanner Types
-														</p>
-														<label className="flex items-center justify-between gap-2 cursor-pointer">
-															<span className="text-xs text-secondary-700 dark:text-white">
-																OpenSCAP (CIS Benchmarks)
-															</span>
-															<input
-																type="checkbox"
-																checked={
-																	integrationsData?.data
-																		?.compliance_openscap_enabled ??
-																	integrationsData?.compliance_openscap_enabled ??
-																	true
-																}
-																onChange={(e) => {
-																	adminHostsAPI
-																		.setComplianceScanners(hostId, {
-																			openscap_enabled: e.target.checked,
-																		})
-																		.then(() => refetchIntegrations())
-																		.catch(() => {});
-																}}
-																className="h-4 w-4 rounded border-secondary-300 text-primary-600 focus:ring-primary-500"
-															/>
-														</label>
-														<label className="flex items-center justify-between gap-2 cursor-pointer">
-															<div className="flex flex-col">
-																<span className="text-xs text-secondary-700 dark:text-white">
-																	Docker Bench
-																</span>
-																{!integrationsData?.data?.integrations
-																	?.docker && (
-																	<span className="text-[10px] text-secondary-400">
-																		Docker integration not enabled
-																	</span>
-																)}
-															</div>
-															<input
-																type="checkbox"
-																checked={
-																	integrationsData?.data
-																		?.compliance_docker_bench_enabled ??
-																	integrationsData?.compliance_docker_bench_enabled ??
-																	false
-																}
-																disabled={
-																	!integrationsData?.data?.integrations?.docker
-																}
-																onChange={(e) => {
-																	adminHostsAPI
-																		.setComplianceScanners(hostId, {
-																			docker_bench_enabled: e.target.checked,
-																		})
-																		.then(() => refetchIntegrations())
-																		.catch(() => {});
-																}}
-																className="h-4 w-4 rounded border-secondary-300 text-primary-600 focus:ring-primary-500 disabled:opacity-40"
-															/>
-														</label>
-													</div>
-												)}
-											</div>
-										</div>
-									</div>
-								)}
-							</div>
-						)}
+						{activeTab === "integrations" && renderIntegrationsPanel()}
 
 						{/* Docker Tab */}
 						{activeTab === "docker" && !hasModule("docker") && (
@@ -4246,6 +4137,22 @@ const HostDetail = () => {
 															/>
 															Re-sync
 														</button>
+														{canManageHosts() && (
+															<button
+																type="button"
+																onClick={() =>
+																	dockerImageCheckMutation.mutate()
+																}
+																disabled={dockerImageCheckMutation.isPending}
+																className="flex items-center gap-1.5 px-2 py-1.5 text-xs font-medium text-primary-600 dark:text-primary-400 bg-primary-50 dark:bg-primary-900/20 hover:bg-primary-100 dark:hover:bg-primary-900/30 rounded border border-primary-200 dark:border-primary-800 transition-colors disabled:opacity-50"
+																title="Check this host's images against their registries"
+															>
+																<RefreshCw
+																	className={`h-3.5 w-3.5 ${dockerImageCheckMutation.isPending ? "animate-spin" : ""}`}
+																/>
+																Check for updates
+															</button>
+														)}
 													</div>
 												</div>
 											);
@@ -4436,6 +4343,7 @@ const HostDetail = () => {
 																	<th className="pb-2 font-medium">Name</th>
 																	<th className="pb-2 font-medium">Image</th>
 																	<th className="pb-2 font-medium">Ports</th>
+																	<th className="pb-2 font-medium">Updates</th>
 																	<th className="pb-2 font-medium text-right">
 																		Uptime
 																	</th>
@@ -4521,6 +4429,11 @@ const HostDetail = () => {
 																				</span>
 																			)}
 																		</td>
+																		<td className="py-2">
+																			<UpdateStatusBadge
+																				status={container.update_status}
+																			/>
+																		</td>
 																		<td className="py-2 text-xs text-secondary-500 dark:text-white text-right">
 																			{container.status || "-"}
 																		</td>
@@ -4550,6 +4463,7 @@ const HostDetail = () => {
 																	</th>
 																	<th className="pb-2 font-medium">Tag</th>
 																	<th className="pb-2 font-medium">ID</th>
+																	<th className="pb-2 font-medium">Updates</th>
 																	<th className="pb-2 font-medium text-right">
 																		Size
 																	</th>
@@ -4573,12 +4487,27 @@ const HostDetail = () => {
 																			</Link>
 																		</td>
 																		<td className="py-2">
-																			<span className="px-2 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 rounded text-xs font-mono">
-																				{image.tag || "latest"}
+																			<span
+																				className="px-2 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 rounded text-xs font-mono max-w-[12rem] truncate inline-block align-middle"
+																				title={image.tag}
+																			>
+																				{image.tag || "<none>"}
 																			</span>
 																		</td>
-																		<td className="py-2 text-xs font-mono text-secondary-500 dark:text-white">
-																			{image.id?.slice(7, 19) || "-"}
+																		<td
+																			className="py-2 text-xs font-mono text-secondary-500 dark:text-white"
+																			title={image.image_id}
+																		>
+																			{shortImageId(image.image_id) || "-"}
+																		</td>
+																		<td className="py-2">
+																			<UpdateStatusBadge
+																				status={image.update_status}
+																				checkedAt={
+																					image.update_check?.checked_at
+																				}
+																				reason={image.update_check?.reason}
+																			/>
 																		</td>
 																		<td className="py-2 text-xs text-secondary-500 dark:text-white text-right">
 																			{image.size || "-"}
@@ -4726,6 +4655,7 @@ const HostDetail = () => {
 										className="rounded-md border border-secondary-300 dark:border-secondary-600 bg-white dark:bg-secondary-800 text-secondary-900 dark:text-white text-sm px-3 py-2"
 									>
 										<option value="">All</option>
+										<option value="scheduled">Scheduled</option>
 										<option value="queued">Queued</option>
 										<option value="running">Running</option>
 										<option value="completed">Completed</option>
@@ -4968,6 +4898,22 @@ const HostDetail = () => {
 									</h3>
 								</div>
 
+								{complianceLastScan?.status === "failed" && (
+									<div className="bg-warning-50 dark:bg-warning-900/20 border border-warning-200 dark:border-warning-700 rounded-md p-4">
+										<div className="flex">
+											<AlertTriangle className="h-5 w-5 flex-shrink-0 text-warning-600 dark:text-warning-400" />
+											<div className="ml-3">
+												<h3 className="text-sm font-medium text-warning-800 dark:text-warning-200">
+													Last scan did not complete
+												</h3>
+												<p className="text-sm text-warning-700 dark:text-warning-300 mt-1">
+													{complianceLastScan.error_message || "Scan failed"}
+												</p>
+											</div>
+										</div>
+									</div>
+								)}
+
 								{/* Summary stats - clickable to scan results filtered by status + host */}
 								{complianceLatest && (
 									<div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -4975,7 +4921,12 @@ const HostDetail = () => {
 											to="/compliance"
 											state={{
 												complianceTab: "scan-results",
-												scanResultsFilters: { status: "pass", host_id: hostId },
+												scanResultsFilters: {
+													status: "pass",
+													host_id: hostId,
+													profile_type:
+														complianceLatest.compliance_profiles?.type || "",
+												},
 											}}
 											className="card p-4 hover:bg-secondary-50 dark:hover:bg-secondary-700/50 transition-colors"
 											title="View passing rules for this host"
@@ -4996,7 +4947,12 @@ const HostDetail = () => {
 											to="/compliance"
 											state={{
 												complianceTab: "scan-results",
-												scanResultsFilters: { status: "fail", host_id: hostId },
+												scanResultsFilters: {
+													status: "fail",
+													host_id: hostId,
+													profile_type:
+														complianceLatest.compliance_profiles?.type || "",
+												},
 											}}
 											className="card p-4 hover:bg-secondary-50 dark:hover:bg-secondary-700/50 transition-colors"
 											title="View failing rules for this host"
@@ -5020,6 +4976,8 @@ const HostDetail = () => {
 												scanResultsFilters: {
 													status: "skipped",
 													host_id: hostId,
+													profile_type:
+														complianceLatest.compliance_profiles?.type || "",
 												},
 											}}
 											className="card p-4 hover:bg-secondary-50 dark:hover:bg-secondary-700/50 transition-colors"
@@ -5731,6 +5689,7 @@ const HostDetail = () => {
 							id: hostId,
 							friendly_name: host?.friendly_name,
 							hostname: host?.hostname,
+							os_type: host?.os_type || host?.expected_platform,
 						},
 					]}
 					onSuccess={handlePatchWizardSuccess}
@@ -5739,190 +5698,194 @@ const HostDetail = () => {
 
 			{/* Apply Pending Config Modal */}
 			{showApplyConfigModal && integrationsData?.pending_config_exists && (
-				<div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-					<div className="bg-white dark:bg-secondary-800 rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden">
-						<div className="p-6">
-							<div className="flex items-start gap-4">
-								<div className="flex-shrink-0 w-10 h-10 rounded-full bg-warning-100 dark:bg-warning-900/30 flex items-center justify-center">
-									<Send className="h-5 w-5 text-warning-600 dark:text-warning-400" />
-								</div>
-								<div className="flex-1 min-w-0">
-									<h3 className="text-lg font-semibold text-secondary-900 dark:text-white">
-										Apply Pending Configuration
-									</h3>
-									<p className="mt-2 text-sm text-secondary-600 dark:text-white">
-										The following changes will be applied to the agent on{" "}
-										<strong>{host?.friendly_name || host?.hostname}</strong>:
-									</p>
-									<ul className="mt-3 space-y-1.5 text-sm text-secondary-700 dark:text-secondary-300">
-										{(() => {
-											const pending = integrationsData?.pending_config || {};
-											const hasComplianceMode = "compliance_mode" in pending;
-											// Order: Docker, Compliance, Compliance mode, OpenSCAP, Docker Bench
-											const order = [
-												"docker_enabled",
-												"compliance_enabled",
-												"compliance_mode",
-												"compliance_on_demand_only",
-												"compliance_openscap_enabled",
-												"compliance_docker_bench_enabled",
-											];
-											const entries = order
-												.filter((key) => {
-													if (!(key in pending)) return false;
-													// Skip redundant: compliance_enabled/compliance_on_demand_only when compliance_mode present
-													if (
-														hasComplianceMode &&
-														(key === "compliance_enabled" ||
-															key === "compliance_on_demand_only")
-													)
-														return false;
-													return true;
-												})
-												.map((key) => {
-													const val = pending[key];
-													const label =
-														key === "docker_enabled"
-															? "Docker monitoring"
-															: key === "compliance_enabled"
-																? "Compliance scanning"
-																: key === "compliance_mode"
-																	? "Compliance mode"
-																	: key === "compliance_on_demand_only"
-																		? "Compliance schedule"
-																		: key === "compliance_openscap_enabled"
-																			? "OpenSCAP"
-																			: key ===
-																					"compliance_docker_bench_enabled"
-																				? "Docker Bench"
-																				: key;
-													let displayVal;
-													if (key === "compliance_mode") {
-														displayVal =
-															val === "disabled"
-																? "Disabled"
-																: val === "on-demand"
-																	? "On-demand"
-																	: val === "enabled"
-																		? "Scheduled"
-																		: String(val);
-													} else if (key === "compliance_on_demand_only") {
-														displayVal = val ? "On-demand only" : "Scheduled";
-													} else if (typeof val === "boolean") {
-														displayVal = val ? "Enabled" : "Disabled";
-													} else {
-														displayVal = String(val);
-													}
-													return { key, label, displayVal };
-												});
-											return entries.map(({ key, label, displayVal }) => (
-												<li key={key} className="flex items-center gap-2">
-													<CheckCircle className="h-4 w-4 text-warning-500 flex-shrink-0" />
-													<span>
-														{label}: <strong>{displayVal}</strong>
-													</span>
-												</li>
-											));
-										})()}
-									</ul>
-									<p className="mt-4 text-sm text-secondary-600 dark:text-white border-t border-secondary-200 dark:border-secondary-600 pt-4">
-										When applied, the agent&apos;s <strong>config.yml</strong>{" "}
-										will be updated and the{" "}
-										<strong>service will restart</strong> on the host.
-									</p>
+				<ModalPortal>
+					<div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[120]">
+						<div className="bg-white dark:bg-secondary-800 rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden">
+							<div className="p-6">
+								<div className="flex items-start gap-4">
+									<div className="flex-shrink-0 w-10 h-10 rounded-full bg-warning-100 dark:bg-warning-900/30 flex items-center justify-center">
+										<Send className="h-5 w-5 text-warning-600 dark:text-warning-400" />
+									</div>
+									<div className="flex-1 min-w-0">
+										<h3 className="text-lg font-semibold text-secondary-900 dark:text-white">
+											Apply Pending Configuration
+										</h3>
+										<p className="mt-2 text-sm text-secondary-600 dark:text-white">
+											The following changes will be applied to the agent on{" "}
+											<strong>{host?.friendly_name || host?.hostname}</strong>:
+										</p>
+										<ul className="mt-3 space-y-1.5 text-sm text-secondary-700 dark:text-secondary-300">
+											{(() => {
+												const pending = integrationsData?.pending_config || {};
+												const hasComplianceMode = "compliance_mode" in pending;
+												// Order: Docker, Compliance, Compliance mode, OpenSCAP, Docker Bench
+												const order = [
+													"docker_enabled",
+													"compliance_enabled",
+													"compliance_mode",
+													"compliance_on_demand_only",
+													"compliance_openscap_enabled",
+													"compliance_docker_bench_enabled",
+												];
+												const entries = order
+													.filter((key) => {
+														if (!(key in pending)) return false;
+														// Skip redundant: compliance_enabled/compliance_on_demand_only when compliance_mode present
+														if (
+															hasComplianceMode &&
+															(key === "compliance_enabled" ||
+																key === "compliance_on_demand_only")
+														)
+															return false;
+														return true;
+													})
+													.map((key) => {
+														const val = pending[key];
+														const label =
+															key === "docker_enabled"
+																? "Docker monitoring"
+																: key === "compliance_enabled"
+																	? "Compliance scanning"
+																	: key === "compliance_mode"
+																		? "Compliance mode"
+																		: key === "compliance_on_demand_only"
+																			? "Compliance schedule"
+																			: key === "compliance_openscap_enabled"
+																				? "OpenSCAP"
+																				: key ===
+																						"compliance_docker_bench_enabled"
+																					? "Docker Bench"
+																					: key;
+														let displayVal;
+														if (key === "compliance_mode") {
+															displayVal =
+																val === "disabled"
+																	? "Disabled"
+																	: val === "on-demand"
+																		? "On-demand"
+																		: val === "enabled"
+																			? "Scheduled"
+																			: String(val);
+														} else if (key === "compliance_on_demand_only") {
+															displayVal = val ? "On-demand only" : "Scheduled";
+														} else if (typeof val === "boolean") {
+															displayVal = val ? "Enabled" : "Disabled";
+														} else {
+															displayVal = String(val);
+														}
+														return { key, label, displayVal };
+													});
+												return entries.map(({ key, label, displayVal }) => (
+													<li key={key} className="flex items-center gap-2">
+														<CheckCircle className="h-4 w-4 text-warning-500 flex-shrink-0" />
+														<span>
+															{label}: <strong>{displayVal}</strong>
+														</span>
+													</li>
+												));
+											})()}
+										</ul>
+										<p className="mt-4 text-sm text-secondary-600 dark:text-white border-t border-secondary-200 dark:border-secondary-600 pt-4">
+											When applied, the agent&apos;s <strong>config.yml</strong>{" "}
+											will be updated and the{" "}
+											<strong>service will restart</strong> on the host.
+										</p>
+									</div>
 								</div>
 							</div>
-						</div>
-						<div className="bg-secondary-50 dark:bg-secondary-700/50 px-6 py-4 flex flex-col sm:flex-row gap-3 sm:justify-end">
-							<button
-								type="button"
-								onClick={() => setShowApplyConfigModal(false)}
-								className="px-4 py-2 text-sm font-medium text-secondary-700 dark:text-secondary-200 bg-white dark:bg-secondary-600 border border-secondary-300 dark:border-secondary-500 rounded-md hover:bg-secondary-50 dark:hover:bg-secondary-500 transition-colors"
-							>
-								Cancel
-							</button>
-							<button
-								type="button"
-								onClick={() => {
-									applyPendingConfigMutation.mutate(undefined, {
-										onSuccess: () => setShowApplyConfigModal(false),
-									});
-								}}
-								disabled={
-									applyPendingConfigMutation.isPending || !wsStatus?.connected
-								}
-								className="px-4 py-2 text-sm font-medium text-white bg-warning-600 hover:bg-warning-700 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-							>
-								{applyPendingConfigMutation.isPending ? (
-									<>
-										<Loader2 className="h-4 w-4 animate-spin" />
-										Applying...
-									</>
-								) : (
-									<>
-										<Send className="h-4 w-4" />
-										Apply
-									</>
-								)}
-							</button>
+							<div className="bg-secondary-50 dark:bg-secondary-700/50 px-6 py-4 flex flex-col sm:flex-row gap-3 sm:justify-end">
+								<button
+									type="button"
+									onClick={() => setShowApplyConfigModal(false)}
+									className="px-4 py-2 text-sm font-medium text-secondary-700 dark:text-secondary-200 bg-white dark:bg-secondary-600 border border-secondary-300 dark:border-secondary-500 rounded-md hover:bg-secondary-50 dark:hover:bg-secondary-500 transition-colors"
+								>
+									Cancel
+								</button>
+								<button
+									type="button"
+									onClick={() => {
+										applyPendingConfigMutation.mutate(undefined, {
+											onSuccess: () => setShowApplyConfigModal(false),
+										});
+									}}
+									disabled={
+										applyPendingConfigMutation.isPending || !wsStatus?.connected
+									}
+									className="px-4 py-2 text-sm font-medium text-white bg-warning-600 hover:bg-warning-700 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+								>
+									{applyPendingConfigMutation.isPending ? (
+										<>
+											<Loader2 className="h-4 w-4 animate-spin" />
+											Applying...
+										</>
+									) : (
+										<>
+											<Send className="h-4 w-4" />
+											Apply
+										</>
+									)}
+								</button>
+							</div>
 						</div>
 					</div>
-				</div>
+				</ModalPortal>
 			)}
 
 			{/* Auto-Update Confirmation Dialog */}
 			{autoUpdateDialog && (
-				<div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-					<div className="bg-white dark:bg-secondary-800 rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden">
-						<div className="p-6">
-							<div className="flex items-start gap-4">
-								<div className="flex-shrink-0 w-10 h-10 rounded-full bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center">
-									<AlertTriangle className="h-5 w-5 text-amber-600 dark:text-amber-400" />
-								</div>
-								<div className="flex-1">
-									<h3 className="text-lg font-semibold text-secondary-900 dark:text-white">
-										Global Auto-Updates Disabled
-									</h3>
-									<p className="mt-2 text-sm text-secondary-600 dark:text-white">
-										The master auto-update setting is currently{" "}
-										<strong>disabled</strong> in Settings &gt; Agent Updates.
-									</p>
-									<p className="mt-2 text-sm text-secondary-600 dark:text-white">
-										Enabling auto-update for{" "}
-										<strong>{host?.friendly_name || host?.hostname}</strong>{" "}
-										won't take effect until global auto-updates are enabled.
-									</p>
+				<ModalPortal>
+					<div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[120]">
+						<div className="bg-white dark:bg-secondary-800 rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden">
+							<div className="p-6">
+								<div className="flex items-start gap-4">
+									<div className="flex-shrink-0 w-10 h-10 rounded-full bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center">
+										<AlertTriangle className="h-5 w-5 text-amber-600 dark:text-amber-400" />
+									</div>
+									<div className="flex-1">
+										<h3 className="text-lg font-semibold text-secondary-900 dark:text-white">
+											Global Auto-Updates Disabled
+										</h3>
+										<p className="mt-2 text-sm text-secondary-600 dark:text-white">
+											The master auto-update setting is currently{" "}
+											<strong>disabled</strong> in Settings &gt; Agent Updates.
+										</p>
+										<p className="mt-2 text-sm text-secondary-600 dark:text-white">
+											Enabling auto-update for{" "}
+											<strong>{host?.friendly_name || host?.hostname}</strong>{" "}
+											won't take effect until global auto-updates are enabled.
+										</p>
+									</div>
 								</div>
 							</div>
-						</div>
-						<div className="bg-secondary-50 dark:bg-secondary-700/50 px-6 py-4 flex flex-col sm:flex-row gap-3 sm:justify-end">
-							<button
-								type="button"
-								onClick={() => setAutoUpdateDialog(false)}
-								className="px-4 py-2 text-sm font-medium text-secondary-700 dark:text-secondary-200 bg-white dark:bg-secondary-600 border border-secondary-300 dark:border-secondary-500 rounded-md hover:bg-secondary-50 dark:hover:bg-secondary-500 transition-colors"
-							>
-								Cancel
-							</button>
-							<button
-								type="button"
-								onClick={handleEnableHostOnly}
-								className="px-4 py-2 text-sm font-medium text-secondary-700 dark:text-secondary-200 bg-white dark:bg-secondary-600 border border-secondary-300 dark:border-secondary-500 rounded-md hover:bg-secondary-50 dark:hover:bg-secondary-500 transition-colors"
-							>
-								Enable Host Only
-							</button>
-							<button
-								type="button"
-								onClick={handleEnableBoth}
-								disabled={enableGlobalAutoUpdateMutation.isPending}
-								className="px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-							>
-								{enableGlobalAutoUpdateMutation.isPending
-									? "Enabling..."
-									: "Enable Both"}
-							</button>
+							<div className="bg-secondary-50 dark:bg-secondary-700/50 px-6 py-4 flex flex-col sm:flex-row gap-3 sm:justify-end">
+								<button
+									type="button"
+									onClick={() => setAutoUpdateDialog(false)}
+									className="px-4 py-2 text-sm font-medium text-secondary-700 dark:text-secondary-200 bg-white dark:bg-secondary-600 border border-secondary-300 dark:border-secondary-500 rounded-md hover:bg-secondary-50 dark:hover:bg-secondary-500 transition-colors"
+								>
+									Cancel
+								</button>
+								<button
+									type="button"
+									onClick={handleEnableHostOnly}
+									className="px-4 py-2 text-sm font-medium text-secondary-700 dark:text-secondary-200 bg-white dark:bg-secondary-600 border border-secondary-300 dark:border-secondary-500 rounded-md hover:bg-secondary-50 dark:hover:bg-secondary-500 transition-colors"
+								>
+									Enable Host Only
+								</button>
+								<button
+									type="button"
+									onClick={handleEnableBoth}
+									disabled={enableGlobalAutoUpdateMutation.isPending}
+									className="px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+								>
+									{enableGlobalAutoUpdateMutation.isPending
+										? "Enabling..."
+										: "Enable Both"}
+								</button>
+							</div>
 						</div>
 					</div>
-				</div>
+				</ModalPortal>
 			)}
 		</div>
 	);
