@@ -45,7 +45,7 @@ const LABELS = {
 	},
 	[WEBHOOK_FORMATS.GOOGLE_CHAT]: {
 		label: "Google Chat",
-		detail: "Plain text message for a Chat space",
+		detail: "Card with severity, details and a link",
 	},
 	[WEBHOOK_FORMATS.GENERIC]: {
 		label: "Generic JSON",
