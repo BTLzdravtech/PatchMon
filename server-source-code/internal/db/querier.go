@@ -648,7 +648,6 @@ type Querier interface {
 	UpdateHostNotes(ctx context.Context, arg UpdateHostNotesParams) error
 	UpdateHostPing(ctx context.Context, id string) error
 	UpdateHostPrimaryInterface(ctx context.Context, arg UpdateHostPrimaryInterfaceParams) error
-	UpdateHostsAutoUpdateMany(ctx context.Context, arg UpdateHostsAutoUpdateManyParams) (int64, error)
 	// Task IDs recur across runs, so only the newest row for a job_id is the current run.
 	UpdateJobHistoryCompleted(ctx context.Context, jobID string) error
 	UpdateJobHistoryDelayed(ctx context.Context, jobID string) error

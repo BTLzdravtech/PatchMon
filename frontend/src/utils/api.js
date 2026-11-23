@@ -206,11 +206,6 @@ export const adminHostsAPI = {
 			delay_minutes: opts.delayMinutes,
 			reason: opts.reason,
 		}),
-	bulkUpdateAutoUpdate: (hostIds, autoUpdate) =>
-		api.patch("/hosts/bulk/auto-update", {
-			hostIds,
-			auto_update: autoUpdate,
-		}),
 	bulkForceAgentUpdate: (hostIds) =>
 		api.post("/hosts/bulk/force-agent-update", { hostIds }),
 	refreshIntegrationStatus: (hostId) =>

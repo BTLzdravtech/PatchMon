@@ -846,33 +846,6 @@ func hostNeedsReboot(h *models.Host) bool {
 	return h != nil && h.NeedsReboot != nil && *h.NeedsReboot
 }
 
-// BulkUpdateAutoUpdate handles PATCH /hosts/bulk/auto-update.
-// Body: { hostIds: [...], auto_update: bool }
-func (h *HostsHandler) BulkUpdateAutoUpdate(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		HostIds    []string `json:"hostIds"`
-		AutoUpdate bool     `json:"auto_update"`
-	}
-	if err := decodeJSON(r, &req); err != nil {
-		Error(w, http.StatusBadRequest, "Invalid request body")
-		return
-	}
-	if len(req.HostIds) == 0 {
-		Error(w, http.StatusBadRequest, "At least one host ID is required")
-		return
-	}
-	n, err := h.hosts.UpdateAutoUpdateMany(r.Context(), req.HostIds, req.AutoUpdate)
-	if err != nil {
-		Error(w, http.StatusInternalServerError, "Failed to update auto-update setting")
-		return
-	}
-	JSON(w, http.StatusOK, map[string]interface{}{
-		"message":      "Auto-update " + map[bool]string{true: "enabled", false: "disabled"}[req.AutoUpdate] + " for " + strconv.FormatInt(n, 10) + " host(s)",
-		"updatedCount": n,
-		"autoUpdate":   req.AutoUpdate,
-	})
-}
-
 // BulkForceAgentUpdate handles POST /hosts/bulk/force-agent-update.
 // Body: { hostIds: [...] }
 // Enqueues one update_agent task per host, bypassing the auto-update flag.

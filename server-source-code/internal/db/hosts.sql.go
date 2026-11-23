@@ -1227,22 +1227,3 @@ func (q *Queries) UpdateHostPrimaryInterface(ctx context.Context, arg UpdateHost
 	_, err := q.db.Exec(ctx, updateHostPrimaryInterface, arg.PrimaryInterface, arg.ID)
 	return err
 }
-
-const updateHostsAutoUpdateMany = `-- name: UpdateHostsAutoUpdateMany :execrows
-UPDATE hosts
-SET auto_update = $1, updated_at = NOW()
-WHERE id = ANY($2::text[])
-`
-
-type UpdateHostsAutoUpdateManyParams struct {
-	AutoUpdate bool     `json:"auto_update"`
-	HostIds    []string `json:"host_ids"`
-}
-
-func (q *Queries) UpdateHostsAutoUpdateMany(ctx context.Context, arg UpdateHostsAutoUpdateManyParams) (int64, error) {
-	result, err := q.db.Exec(ctx, updateHostsAutoUpdateMany, arg.AutoUpdate, arg.HostIds)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}

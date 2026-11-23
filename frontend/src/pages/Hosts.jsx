@@ -26,7 +26,6 @@ import {
 	GripVertical,
 	Plus,
 	Power,
-	PowerOff,
 	RefreshCw,
 	RotateCcw,
 	Search,
@@ -788,35 +787,6 @@ const Hosts = () => {
 		onError: (error) => {
 			setBulkFetchReportMessage({
 				text: error.response?.data?.error || "Failed to queue reboots",
-				type: "error",
-			});
-			setTimeout(
-				() => setBulkFetchReportMessage({ text: "", type: "error" }),
-				5000,
-			);
-		},
-	});
-
-	const bulkAutoUpdateMutation = useMutation({
-		mutationFn: ({ hostIds, autoUpdate }) =>
-			adminHostsAPI
-				.bulkUpdateAutoUpdate(hostIds, autoUpdate)
-				.then((res) => res.data),
-		onSuccess: (data) => {
-			queryClient.invalidateQueries({ queryKey: ["hosts"] });
-			setBulkFetchReportMessage({
-				text: data?.message || "Auto-update setting updated",
-				type: "success",
-			});
-			setTimeout(
-				() => setBulkFetchReportMessage({ text: "", type: "success" }),
-				5000,
-			);
-		},
-		onError: (error) => {
-			setBulkFetchReportMessage({
-				text:
-					error.response?.data?.error || "Failed to update auto-update setting",
 				type: "error",
 			});
 			setTimeout(
@@ -2139,42 +2109,6 @@ const Hosts = () => {
 										<span className="hidden sm:inline">Update Agents</span>
 										<span className="sm:hidden">Update</span>
 									</button>
-								)}
-								{canManageHosts() && (
-									<>
-										<button
-											type="button"
-											onClick={() =>
-												bulkAutoUpdateMutation.mutate({
-													hostIds: selectedHosts,
-													autoUpdate: true,
-												})
-											}
-											disabled={bulkAutoUpdateMutation.isPending}
-											className="btn-outline flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 min-h-[44px] text-xs sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-											title="Enable agent auto-update on the selected hosts"
-										>
-											<Power className="h-4 w-4 flex-shrink-0" />
-											<span className="hidden sm:inline">Auto-update On</span>
-											<span className="sm:hidden">On</span>
-										</button>
-										<button
-											type="button"
-											onClick={() =>
-												bulkAutoUpdateMutation.mutate({
-													hostIds: selectedHosts,
-													autoUpdate: false,
-												})
-											}
-											disabled={bulkAutoUpdateMutation.isPending}
-											className="btn-outline flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 min-h-[44px] text-xs sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-											title="Disable agent auto-update on the selected hosts"
-										>
-											<PowerOff className="h-4 w-4 flex-shrink-0" />
-											<span className="hidden sm:inline">Auto-update Off</span>
-											<span className="sm:hidden">Off</span>
-										</button>
-									</>
 								)}
 								<button
 									type="button"
