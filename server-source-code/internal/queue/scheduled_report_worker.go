@@ -301,6 +301,8 @@ func sendScheduledWebhook(ctx context.Context, plain, subject, html, csv string)
 		b, err = discordScheduledReportWebhookBody(subject, html, csv)
 	case isSlackIncomingWebhookURL(cfg.URL), isSlackCompatibleWebhookURL(cfg.URL):
 		b, err = slackScheduledReportWebhookBody(subject, html, csv)
+	case isGoogleChatWebhookURL(cfg.URL):
+		b, err = googleChatScheduledReportWebhookBody(subject, html)
 	default:
 		body := map[string]interface{}{
 			"kind":    "scheduled_report",

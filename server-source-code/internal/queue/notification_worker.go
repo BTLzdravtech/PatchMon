@@ -759,6 +759,9 @@ func (h *NotificationDeliverHandler) sendWebhook(ctx context.Context, plain stri
 	case isSlackIncomingWebhookURL(cfg.URL), isSlackCompatibleWebhookURL(cfg.URL):
 		format = "slack_compatible"
 		b, err = slackIncomingWebhookBody(p)
+	case isGoogleChatWebhookURL(cfg.URL):
+		format = "google_chat"
+		b, err = googleChatWebhookBody(p)
 	default:
 		body := map[string]interface{}{
 			"event_type": p.EventType,

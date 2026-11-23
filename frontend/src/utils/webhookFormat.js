@@ -1,7 +1,8 @@
 /**
  * Mirrors the webhook payload-format detection in
  * server-source-code/internal/queue/notification_worker.go
- * (isDiscordWebhookURL, isSlackIncomingWebhookURL, isSlackCompatibleWebhookURL).
+ * (isDiscordWebhookURL, isSlackIncomingWebhookURL, isSlackCompatibleWebhookURL)
+ * and notification_googlechat.go (isGoogleChatWebhookURL).
  *
  * Keep the two in sync, and keep both test suites passing. This exists so the
  * destination form can show which payload the server will send before saving;
@@ -25,6 +26,7 @@ export const WEBHOOK_FORMATS = {
 	DISCORD: "discord",
 	SLACK: "slack",
 	SLACK_COMPATIBLE: "slack_compatible",
+	GOOGLE_CHAT: "google_chat",
 	GENERIC: "generic",
 };
 
@@ -40,6 +42,10 @@ const LABELS = {
 	[WEBHOOK_FORMATS.SLACK_COMPATIBLE]: {
 		label: "Mattermost or Rocket.Chat",
 		detail: "Slack-compatible message",
+	},
+	[WEBHOOK_FORMATS.GOOGLE_CHAT]: {
+		label: "Google Chat",
+		detail: "Plain text message for a Chat space",
 	},
 	[WEBHOOK_FORMATS.GENERIC]: {
 		label: "Generic JSON",
@@ -79,6 +85,9 @@ export function detectWebhookFormat(raw) {
 	if (isSlackCompatible(host, path)) {
 		return WEBHOOK_FORMATS.SLACK_COMPATIBLE;
 	}
+	if (isGoogleChat(host, path)) {
+		return WEBHOOK_FORMATS.GOOGLE_CHAT;
+	}
 	return WEBHOOK_FORMATS.GENERIC;
 }
 
@@ -93,6 +102,18 @@ function isSlackCompatible(host, path) {
 		return rest.every((token) => SLACK_COMPATIBLE_TOKEN.test(token));
 	}
 	return false;
+}
+
+function isGoogleChat(host, path) {
+	if (host !== "chat.googleapis.com") return false;
+	const segments = path.replace(/^\/+|\/+$/g, "").split("/");
+	return (
+		segments.length === 4 &&
+		segments[0] === "v1" &&
+		segments[1] === "spaces" &&
+		segments[2] !== "" &&
+		segments[3] === "messages"
+	);
 }
 
 /** Human-readable name and one-line description for a format, or null. */

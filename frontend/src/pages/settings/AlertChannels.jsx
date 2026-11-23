@@ -111,7 +111,8 @@ const CHANNEL_TYPES = [
 	{
 		value: "webhook",
 		label: "Webhook",
-		description: "Generic, Discord, Slack, Mattermost or Rocket.Chat",
+		description:
+			"Generic, Discord, Slack, Google Chat, Mattermost or Rocket.Chat",
 		icon: Globe,
 		brandIcons: { discord: SiDiscord, slack: Slack },
 	},
