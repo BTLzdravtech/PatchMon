@@ -98,25 +98,31 @@ verify_datetime() {
 # Run datetime verification
 verify_datetime
 
+prune_backups() {
+    ls -t "$@" 2>/dev/null | tail -n +4 | while IFS= read -r old; do
+        rm -f "$old"
+    done
+}
+
 # Clean up old files (keep only last 3 of each type)
 cleanup_old_files() {
     # Clean up old credential backups
-    ls -t /etc/patchmon/credentials.yml.backup.* 2>/dev/null | tail -n +4 | xargs -r rm -f
+    prune_backups /etc/patchmon/credentials.yml.backup.*
     
     # Clean up old config backups
-    ls -t /etc/patchmon/config.yml.backup.* 2>/dev/null | tail -n +4 | xargs -r rm -f
+    prune_backups /etc/patchmon/config.yml.backup.*
     
     # Clean up old agent backups
-    ls -t /usr/local/bin/patchmon-agent.backup.* 2>/dev/null | tail -n +4 | xargs -r rm -f
+    prune_backups /usr/local/bin/patchmon-agent.backup.*
     
     # Clean up old log files
-    ls -t /etc/patchmon/logs/patchmon-agent.log.old.* 2>/dev/null | tail -n +4 | xargs -r rm -f
+    prune_backups /etc/patchmon/logs/patchmon-agent.log.old.*
     
     # Clean up old shell script backups (if any exist)
-    ls -t /usr/local/bin/patchmon-agent.sh.backup.* 2>/dev/null | tail -n +4 | xargs -r rm -f
+    prune_backups /usr/local/bin/patchmon-agent.sh.backup.*
     
     # Clean up old credentials backups (if any exist)
-    ls -t /etc/patchmon/credentials.backup.* 2>/dev/null | tail -n +4 | xargs -r rm -f
+    prune_backups /etc/patchmon/credentials.backup.*
 }
 
 # Run cleanup at start
@@ -124,7 +130,6 @@ cleanup_old_files
 
 # Generate or retrieve machine ID
 get_machine_id() {
-    # FreeBSD: use hostid or kern.hostuuid
     if [ "$(uname -s 2>/dev/null)" = "FreeBSD" ]; then
         if [ -f /etc/hostid ]; then
             cat /etc/hostid
@@ -135,18 +140,32 @@ get_machine_id() {
             echo "$_uuid"
             return
         fi
-        echo "patchmon-freebsd-$(hostname 2>/dev/null)-$(date +%s 2>/dev/null)"
-        return
-    fi
-    # Linux: try multiple sources
-    if [ -f /etc/machine-id ]; then
-        cat /etc/machine-id
-    elif [ -f /var/lib/dbus/machine-id ]; then
-        cat /var/lib/dbus/machine-id
     else
-        # Fallback: generate from hardware info (less ideal but works)
-        echo "patchmon-$(cat /sys/class/dmi/id/product_uuid 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)"
+        for _mid_file in /etc/machine-id /var/lib/dbus/machine-id; do
+            _mid=$(head -n 1 "$_mid_file" 2>/dev/null | tr -d '[:space:]')
+            case "$_mid" in
+                ""|uninitialized) ;;
+                *) echo "$_mid"; return ;;
+            esac
+        done
     fi
+    # Reruns must send the same ID, or the server cannot match this machine to its host
+    _mid_store=/var/lib/patchmon/machine-id
+    _mid=$(head -n 1 "$_mid_store" 2>/dev/null | tr -d '[:space:]')
+    if [ -z "$_mid" ]; then
+        if [ "$(uname -s 2>/dev/null)" = "FreeBSD" ]; then
+            _mid="patchmon-freebsd-$(hostname 2>/dev/null)-$(date +%s 2>/dev/null)"
+        else
+            _mid=$( (cat /sys/class/dmi/id/product_uuid || cat /proc/sys/kernel/random/uuid) 2>/dev/null | tr -d '[:space:]')
+            [ -n "$_mid" ] && _mid="patchmon-$_mid"
+        fi
+        if [ -n "$_mid" ] && mkdir -p "${_mid_store%/*}" 2>/dev/null; then
+            (umask 077; set -C; printf '%s\n' "$_mid" > "$_mid_store") 2>/dev/null || true
+            _mid_saved=$(head -n 1 "$_mid_store" 2>/dev/null | tr -d '[:space:]')
+            if [ -n "$_mid_saved" ]; then _mid=$_mid_saved; fi
+        fi
+    fi
+    echo "$_mid"
 }
 
 # Parse arguments from environment (passed via HTTP headers)
@@ -223,6 +242,16 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+run_logged() {
+    _log="$1"
+    shift
+    _rcfile=$(mktemp 2>/dev/null || echo "/tmp/patchmon_install_rc.$$")
+    { "$@" 2>&1 && _rc=0 || _rc=$?; echo "$_rc" > "$_rcfile"; } | tee "$_log"
+    _rc=$(cat "$_rcfile" 2>/dev/null || echo 1)
+    rm -f "$_rcfile"
+    return "${_rc:-1}"
+}
+
 # Function to install packages with error handling
 install_apt_packages() {
     # Space-separated list of packages
@@ -255,7 +284,7 @@ install_apt_packages() {
     fi
     
     # Try to install packages
-    if eval "$_apt_cmd" 2>&1 | tee /tmp/patchmon_apt_install.log; then
+    if run_logged /tmp/patchmon_apt_install.log eval "$_apt_cmd"; then
         success "Packages installed successfully"
         return 0
     else
@@ -392,7 +421,7 @@ install_apk_packages() {
     _apk_cmd="apk add --no-cache $_missing_packages"
     
     # Try to install packages
-    if eval "$_apk_cmd" 2>&1 | tee /tmp/patchmon_apk_install.log; then
+    if run_logged /tmp/patchmon_apk_install.log eval "$_apk_cmd"; then
         success "Packages installed successfully"
         return 0
     else
@@ -563,7 +592,7 @@ if [ -f "/etc/patchmon/config.yml" ]; then
     warning "Moving existing file out of the way for fresh installation"
     
     # Clean up old config backups (keep only last 3)
-    ls -t /etc/patchmon/config.yml.backup.* 2>/dev/null | tail -n +4 | xargs -r rm -f
+    prune_backups /etc/patchmon/config.yml.backup.*
     
     # Move existing file out of the way
     mv /etc/patchmon/config.yml /etc/patchmon/config.yml.backup.$(date +%Y%m%d_%H%M%S)
@@ -576,7 +605,7 @@ if [ -f "/etc/patchmon/credentials.yml" ]; then
     warning "Moving existing file out of the way for fresh installation"
     
     # Clean up old credential backups (keep only last 3)
-    ls -t /etc/patchmon/credentials.yml.backup.* 2>/dev/null | tail -n +4 | xargs -r rm -f
+    prune_backups /etc/patchmon/credentials.yml.backup.*
     
     # Move existing file out of the way
     mv /etc/patchmon/credentials.yml /etc/patchmon/credentials.yml.backup.$(date +%Y%m%d_%H%M%S)
@@ -590,10 +619,17 @@ if [ -f "/etc/patchmon/credentials" ]; then
     info "Removed old credentials file"
 fi
 
+HOST_ID_LINE=""
+case "${PATCHMON_HOST_ID:-}" in
+    ""|*[!A-Za-z0-9-]*) ;;
+    *) HOST_ID_LINE="host_id: \"$PATCHMON_HOST_ID\"" ;;
+esac
+
 # Create main config file
 cat > /etc/patchmon/config.yml << EOF
 # PatchMon Agent Configuration
 # Generated on $(date)
+${HOST_ID_LINE}
 patchmon_server: "$PATCHMON_URL"
 api_version: "v1"
 credentials_file: "/etc/patchmon/credentials.yml"
@@ -628,17 +664,22 @@ info "Downloading PatchMon agent binary..."
 # Determine the binary filename based on platform and architecture
 BINARY_NAME="patchmon-agent-${PATCHMON_OS}-${ARCHITECTURE}"
 
+# Some minimal installations do not have /usr/local/bin yet.
+mkdir -p /usr/local/bin || error "Cannot create /usr/local/bin for the PatchMon agent"
+
 # Check if agent binary already exists
+AGENT_BACKUP=""
 if [ -f "/usr/local/bin/patchmon-agent" ]; then
     warning "Agent binary already exists at /usr/local/bin/patchmon-agent"
     warning "Moving existing file out of the way for fresh installation"
     
     # Clean up old agent backups (keep only last 3)
-    ls -t /usr/local/bin/patchmon-agent.backup.* 2>/dev/null | tail -n +4 | xargs -r rm -f
+    prune_backups /usr/local/bin/patchmon-agent.backup.*
     
     # Move existing file out of the way
-    mv /usr/local/bin/patchmon-agent /usr/local/bin/patchmon-agent.backup.$(date +%Y%m%d_%H%M%S)
-    info "Moved existing agent to: /usr/local/bin/patchmon-agent.backup.$(date +%Y%m%d_%H%M%S)"
+    AGENT_BACKUP="/usr/local/bin/patchmon-agent.backup.$(date +%Y%m%d_%H%M%S)"
+    mv /usr/local/bin/patchmon-agent "$AGENT_BACKUP"
+    info "Moved existing agent to: $AGENT_BACKUP"
 fi
 
 # Clean up old shell script if it exists (from previous installations)
@@ -648,14 +689,38 @@ if [ -f "/usr/local/bin/patchmon-agent.sh" ]; then
     info "Removed old shell script agent"
 fi
 
-# Download the binary
-curl $CURL_FLAGS \
-    -H "X-API-ID: $API_ID" \
-    -H "X-API-KEY: $API_KEY" \
-    "$PATCHMON_URL/api/v1/hosts/agent/download?arch=$ARCHITECTURE&os=$PATCHMON_OS&force=binary" \
-    -o /usr/local/bin/patchmon-agent
+download_agent_binary() {
+    _dl="/usr/local/bin/.patchmon-agent.download.$$"
+    rm -f "$_dl"
+    if ! curl $CURL_FLAGS -fS \
+        -H "X-API-ID: $API_ID" \
+        -H "X-API-KEY: $API_KEY" \
+        "$PATCHMON_URL/api/v1/hosts/agent/download?arch=$ARCHITECTURE&os=$PATCHMON_OS&force=binary" \
+        -o "$_dl"; then
+        rm -f "$_dl"
+        return 1
+    fi
+    if [ ! -s "$_dl" ]; then
+        warning "Downloaded agent binary is empty"
+        rm -f "$_dl"
+        return 1
+    fi
+    chmod 755 "$_dl"
+    if ! "$_dl" --version >/dev/null 2>&1; then
+        warning "Downloaded file is not a working agent binary for $PATCHMON_OS/$ARCHITECTURE"
+        rm -f "$_dl"
+        return 1
+    fi
+    mv -f "$_dl" /usr/local/bin/patchmon-agent
+}
 
-chmod +x /usr/local/bin/patchmon-agent
+if ! download_agent_binary; then
+    if [ -n "$AGENT_BACKUP" ] && [ -f "$AGENT_BACKUP" ]; then
+        mv -f "$AGENT_BACKUP" /usr/local/bin/patchmon-agent
+        warning "Previous agent binary restored from backup"
+    fi
+    error "Failed to download the agent binary from $PATCHMON_URL. Check the server URL, credentials and network, then re-run the installation script."
+fi
 
 # Get the agent version from the binary
 AGENT_VERSION=$(/usr/local/bin/patchmon-agent --version 2>/dev/null | awk '{print $NF}')
@@ -869,7 +934,7 @@ EOF
         service patchmon_agent enable 2>/dev/null || true
         service patchmon_agent start
         sleep 1
-        if service patchmon_agent status 2>/dev/null | grep -q "running"; then
+        if service patchmon_agent onestatus >/dev/null 2>&1; then
             success "PatchMon Agent service started successfully"
             info "WebSocket connection established"
         else

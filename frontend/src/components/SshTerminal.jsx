@@ -20,6 +20,8 @@ import {
 // Note: Auth is handled via httpOnly cookies - no need for useAuth token
 import { useSidebar } from "../contexts/SidebarContext";
 import { aiAPI, settingsAPI } from "../utils/api";
+import { isWindowsOs } from "../utils/windowsPatching";
+import ModalPortal from "./ui/ModalPortal";
 
 /** Remove line breaks from values before logging to avoid log injection (CWE-117). */
 function sanitizeForLog(value) {
@@ -28,6 +30,26 @@ function sanitizeForLog(value) {
 	}
 	return String(value).replace(/\n|\r/g, "");
 }
+
+const WindowsSshNote = () => (
+	<div className="flex items-start gap-2 p-3 bg-blue-900/30 border border-blue-700 rounded text-blue-200 text-xs">
+		<Info className="h-4 w-4 flex-shrink-0 mt-0.5 text-blue-400" />
+		<p>
+			Windows hosts need the OpenSSH Server feature enabled and running. Sign in
+			as Administrator or another local administrator. On Windows 10 and 11 the
+			built-in Administrator is disabled by default and its name is localised on
+			non-English installs, so use your own admin account.{" "}
+			<a
+				href="https://patchmon.net/docs/patchmon-admin-guide#web-ssh-terminal-windows"
+				target="_blank"
+				rel="noopener noreferrer"
+				className="inline-flex items-center min-h-[44px] md:min-h-0 font-medium underline hover:text-white"
+			>
+				How to enable OpenSSH Server
+			</a>
+		</p>
+	</div>
+);
 
 const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 	const { setSidebarCollapsed, sidebarCollapsed } = useSidebar();
@@ -58,19 +80,12 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 	const aiInputRef = useRef(null);
 	const currentLineRef = useRef(""); // Track current line for AI context
 
-	// Load cached username from localStorage, keyed by host ID for per-host caching
-	const _getCachedUsername = () => {
-		if (!host?.id) return "root";
-		try {
-			const cached = localStorage.getItem(`ssh_username_${host.id}`);
-			return cached || "root";
-		} catch {
-			return "root";
-		}
-	};
+	const isWindows =
+		isWindowsOs(host?.os_type) || isWindowsOs(host?.expected_platform);
+	const defaultUsername = isWindows ? "Administrator" : "root";
 
 	const [sshConfig, setSshConfig] = useState({
-		username: "root", // Will be updated in useEffect when host is available
+		username: defaultUsername, // Will be updated in useEffect when host is available
 		password: "",
 		privateKey: "",
 		passphrase: "",
@@ -85,16 +100,16 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 	useEffect(() => {
 		if (host?.id) {
 			// Get cached username directly to avoid dependency issues
-			let cachedUsername = "root";
+			let cachedUsername = defaultUsername;
 			try {
 				const cached = localStorage.getItem(`ssh_username_${host.id}`);
-				cachedUsername = cached || "root";
+				cachedUsername = cached || defaultUsername;
 			} catch {
 				// localStorage might be disabled
 			}
 			setSshConfig((prev) => ({ ...prev, username: cachedUsername }));
 		}
-	}, [host?.id]);
+	}, [host?.id, defaultUsername]);
 
 	// Save username to localStorage when it changes (debounced on blur/connect)
 	const saveUsername = (username) => {
@@ -915,7 +930,7 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 								<span className="px-2 py-0.5 text-xs font-medium bg-green-900 text-green-200 rounded">
 									Connected
 								</span>
-								{host?.api_id && host?.api_key && (
+								{!isWindows && host?.api_id && host?.api_key && (
 									<div className="relative" data-install-commands>
 										<button
 											type="button"
@@ -1011,6 +1026,7 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 									{error}
 								</div>
 							)}
+							{isWindows && <WindowsSshNote />}
 
 							{/* Connection Mode Toggle */}
 							<div className="flex gap-6 mb-1">
@@ -1153,7 +1169,7 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 											onBlur={(e) => saveUsername(e.target.value)}
 											autoComplete="username"
 											className="w-full px-3 py-2 text-sm bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
-											placeholder="root"
+											placeholder={defaultUsername}
 											tabIndex="0"
 										/>
 									</div>
@@ -1223,7 +1239,7 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 											onBlur={(e) => saveUsername(e.target.value)}
 											autoComplete="username"
 											className="w-full px-3 py-2 text-sm bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
-											placeholder="root"
+											placeholder={defaultUsername}
 											tabIndex="0"
 										/>
 									</div>
@@ -1518,8 +1534,8 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 	}
 
 	// Modal mode - full screen overlay
-	return (
-		<div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
+	const modal = (
+		<div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-[120]">
 			<div className="bg-secondary-900 rounded-lg w-full h-full max-w-[95vw] max-h-[95vh] flex flex-col m-2">
 				{/* Header */}
 				<div className="flex items-center justify-between p-4 border-b border-secondary-700">
@@ -1570,6 +1586,7 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 									{error}
 								</div>
 							)}
+							{isWindows && <WindowsSshNote />}
 							<div className="grid grid-cols-2 gap-4">
 								<div>
 									<label className="block text-sm font-medium text-secondary-300 mb-1">
@@ -1584,7 +1601,7 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 										onBlur={(e) => saveUsername(e.target.value)}
 										autoComplete="username"
 										className="w-full px-3 py-2 bg-secondary-700 border border-secondary-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
-										placeholder="root"
+										placeholder={defaultUsername}
 									/>
 								</div>
 								<div>
@@ -1665,6 +1682,8 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 			</div>
 		</div>
 	);
+
+	return <ModalPortal>{modal}</ModalPortal>;
 };
 
 export default SshTerminal;

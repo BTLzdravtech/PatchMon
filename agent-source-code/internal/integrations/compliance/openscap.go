@@ -5,14 +5,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
 	"patchmon-agent/internal/logutil"
+	"patchmon-agent/internal/packages"
 	"patchmon-agent/pkg/models"
 
 	"github.com/sirupsen/logrus"
@@ -59,11 +63,13 @@ var profileMappings = map[string]map[string]string{
 
 // OpenSCAPScanner handles OpenSCAP compliance scanning
 type OpenSCAPScanner struct {
-	logger    *logrus.Logger
-	osInfo    models.ComplianceOSInfo
-	idLike    string // Stores ID_LIKE from /etc/os-release for base distribution detection
-	available bool
-	version   string
+	logger         *logrus.Logger
+	osInfo         models.ComplianceOSInfo
+	idLike         string // Stores ID_LIKE from /etc/os-release for base distribution detection
+	ubuntuCodename string
+	debianCodename string
+	available      bool
+	version        string
 }
 
 // NewOpenSCAPScanner creates a new OpenSCAP scanner
@@ -299,7 +305,10 @@ func (s *OpenSCAPScanner) EnsureInstalled() error {
 	defer cancel()
 
 	// Environment for non-interactive apt operations
+	// apt-cache policy is parsed for the English "Candidate:" label.
 	nonInteractiveEnv := append(os.Environ(),
+		"LC_ALL=C",
+		"LANGUAGE=",
 		"DEBIAN_FRONTEND=noninteractive",
 		"NEEDRESTART_MODE=a",
 		"NEEDRESTART_SUSPEND=1",
@@ -448,7 +457,8 @@ func aptAvailable(ctx context.Context, env []string, pkgs []string) []string {
 func aptInstall(ctx context.Context, env []string, onlyUpgrade bool, pkgs ...string) ([]byte, error) {
 	args := []string{"install", "-y", "-qq",
 		"-o", "Dpkg::Options::=--force-confdef",
-		"-o", "Dpkg::Options::=--force-confold"}
+		"-o", "Dpkg::Options::=--force-confold",
+		"-o", "Acquire::Retries=0"}
 	if onlyUpgrade {
 		args = append(args, "--only-upgrade")
 	}
@@ -548,7 +558,20 @@ func (s *OpenSCAPScanner) installRHEL(ctx context.Context) error {
 func (s *OpenSCAPScanner) installSUSE(ctx context.Context) error {
 	s.logger.Info("Installing/upgrading OpenSCAP on SUSE-based system...")
 
-	output, err := exec.CommandContext(ctx, "zypper", "--non-interactive", "install", "openscap-utils").CombinedOutput()
+	release, err := packages.AcquireZypper(ctx, func() {
+		s.logger.Info("Waiting for a zypper operation by this agent to finish before installing OpenSCAP")
+	})
+	if err != nil {
+		return fmt.Errorf("waiting for zypper: %w", err)
+	}
+	defer release()
+	zypper := func(pkg string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, "zypper", "--non-interactive", "install", pkg)
+		cmd.Env = packages.ZypperEnv(os.Environ())
+		return cmd
+	}
+
+	output, err := zypper("openscap-utils").CombinedOutput()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			s.logger.Warn("OpenSCAP installation timed out after 5 minutes")
@@ -558,7 +581,7 @@ func (s *OpenSCAPScanner) installSUSE(ctx context.Context) error {
 		return fmt.Errorf("failed to install OpenSCAP: %w - %s", err, truncateOutput(output))
 	}
 
-	ssgOutput, ssgErr := exec.CommandContext(ctx, "zypper", "--non-interactive", "install", "scap-security-guide").CombinedOutput()
+	ssgOutput, ssgErr := zypper("scap-security-guide").CombinedOutput()
 	if ssgErr != nil {
 		s.logger.WithField("output", logutil.Sanitize(string(ssgOutput))).Warn("scap-security-guide not available; content will be synced from the PatchMon server")
 	}
@@ -595,11 +618,12 @@ func (s *OpenSCAPScanner) checkContentCompatibility() {
 // contentFileMatchesOSVersion reports whether a datastream file name belongs to
 // this OS version, accepting any of the product name variants for the distro.
 func (s *OpenSCAPScanner) contentFileMatchesOSVersion(baseName string) bool {
-	if strings.Contains(baseName, strings.ReplaceAll(s.osInfo.Version, ".", "")) {
+	version := s.contentVersion()
+	if strings.Contains(baseName, strings.ReplaceAll(version, ".", "")) {
 		return true
 	}
 
-	majorVersion := strings.Split(s.osInfo.Version, ".")[0]
+	majorVersion := strings.Split(version, ".")[0]
 	contentOSName := s.getContentOSName()
 	names := contentOSNameVariants(contentOSName)
 	if contentOSName != s.osInfo.Name {
@@ -685,14 +709,14 @@ func (s *OpenSCAPScanner) pickSSGFile(available []string) string {
 		avail[f] = true
 	}
 
-	for _, c := range ssgFileCandidates(contentOSName, s.osInfo.Version) {
+	for _, c := range ssgFileCandidates(contentOSName, s.contentVersion()) {
 		if avail[c] {
 			return c
 		}
 	}
 
 	if contentOSName != s.osInfo.Name {
-		for _, c := range ssgFileCandidates(s.osInfo.Name, s.osInfo.Version) {
+		for _, c := range ssgFileCandidates(s.osInfo.Name, s.contentVersion()) {
 			if avail[c] {
 				return c
 			}
@@ -791,12 +815,10 @@ func (s *OpenSCAPScanner) checkAvailability() {
 
 // detectOS detects the operating system
 func (s *OpenSCAPScanner) detectOS() models.ComplianceOSInfo {
-	info := models.ComplianceOSInfo{}
-
 	file, err := os.Open(osReleasePath)
 	if err != nil {
 		s.logger.WithError(err).Debug("Failed to open os-release")
-		return info
+		return models.ComplianceOSInfo{}
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
@@ -804,7 +826,15 @@ func (s *OpenSCAPScanner) detectOS() models.ComplianceOSInfo {
 		}
 	}()
 
-	scanner := bufio.NewScanner(file)
+	return s.parseOSRelease(file)
+}
+
+// parseOSRelease reads os-release content. A derivative that sets ID_LIKE=debian but no
+// DEBIAN_CODENAME, such as UCS 5.2, takes its Debian codename from VERSION_CODENAME.
+func (s *OpenSCAPScanner) parseOSRelease(r io.Reader) models.ComplianceOSInfo {
+	info := models.ComplianceOSInfo{}
+	var versionCodename string
+	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := scanner.Text()
 		parts := strings.SplitN(line, "=", 2)
@@ -819,6 +849,12 @@ func (s *OpenSCAPScanner) detectOS() models.ComplianceOSInfo {
 			info.Name = value
 		case "VERSION_ID":
 			info.Version = value
+		case "UBUNTU_CODENAME":
+			s.ubuntuCodename = value
+		case "DEBIAN_CODENAME":
+			s.debianCodename = value
+		case "VERSION_CODENAME":
+			versionCodename = value
 		case "ID_LIKE":
 			// Store ID_LIKE for base distribution detection
 			s.idLike = value
@@ -831,6 +867,10 @@ func (s *OpenSCAPScanner) detectOS() models.ComplianceOSInfo {
 				info.Family = "suse"
 			}
 		}
+	}
+
+	if s.debianCodename == "" && strings.Contains(s.idLike, "debian") {
+		s.debianCodename = versionCodename
 	}
 
 	// Set family from ID if not set from ID_LIKE
@@ -889,6 +929,36 @@ func (s *OpenSCAPScanner) getContentOSName() string {
 	return s.osInfo.Name
 }
 
+var ubuntuCodenameReleases = map[string]string{
+	"xenial": "16.04", "bionic": "18.04", "focal": "20.04", "jammy": "22.04",
+	"kinetic": "22.10", "lunar": "23.04", "mantic": "23.10", "noble": "24.04",
+	"oracular": "24.10", "plucky": "25.04", "questing": "25.10", "resolute": "26.04",
+}
+
+var debianCodenameReleases = map[string]string{
+	"buster": "10", "bullseye": "11", "bookworm": "12", "trixie": "13", "forky": "14",
+}
+
+// contentVersion is the release the SSG datastream is keyed on. A derivative
+// such as Zorin OS or Linux Mint reports its own VERSION_ID, not its base's.
+func (s *OpenSCAPScanner) contentVersion() string {
+	base := s.getContentOSName()
+	if base == s.osInfo.Name {
+		return s.osInfo.Version
+	}
+	switch base {
+	case "ubuntu":
+		if v, ok := ubuntuCodenameReleases[s.ubuntuCodename]; ok {
+			return v
+		}
+	case "debian":
+		if v, ok := debianCodenameReleases[s.debianCodename]; ok {
+			return v
+		}
+	}
+	return s.osInfo.Version
+}
+
 // getContentFile returns the appropriate SCAP content file for this OS
 func (s *OpenSCAPScanner) getContentFile() string {
 	if s.osInfo.Name == "" {
@@ -914,7 +984,7 @@ func (s *OpenSCAPScanner) getContentFile() string {
 
 // findContentFile looks on disk for a datastream belonging to one OS name.
 func (s *OpenSCAPScanner) findContentFile(osName string) string {
-	for _, pattern := range ssgFileCandidates(osName, s.osInfo.Version) {
+	for _, pattern := range ssgFileCandidates(osName, s.contentVersion()) {
 		path := filepath.Join(scapContentDir, pattern)
 		if _, err := os.Stat(path); err == nil {
 			return path
@@ -935,7 +1005,7 @@ func (s *OpenSCAPScanner) findContentFile(osName string) string {
 // bestContentMatch chooses the best content file from multiple matches (e.g. ssg-debian10, ssg-debian11, ssg-debian13).
 // Prefers the file whose version matches the OS major version; otherwise the highest version not exceeding it.
 func (s *OpenSCAPScanner) bestContentMatch(matches []string, contentOSName string) string {
-	majorVersion := strings.Split(s.osInfo.Version, ".")[0]
+	majorVersion := strings.Split(s.contentVersion(), ".")[0]
 	wantPrefix := contentOSName + majorVersion // e.g. "debian13"
 
 	// Prefer exact version match
@@ -1022,6 +1092,51 @@ func (s *OpenSCAPScanner) getProfileID(profileName string) string {
 			if profileID, exists := osProfiles[s.osInfo.Name]; exists {
 				return profileID
 			}
+		}
+	}
+	return ""
+}
+
+// reportedProfileName returns the alias whose mapping on this OS is the given
+// XCCDF ID, so the server stores one profile however the scan was requested.
+func (s *OpenSCAPScanner) reportedProfileName(requested string) string {
+	if !strings.HasPrefix(requested, "xccdf_") {
+		return requested
+	}
+	aliases := make([]string, 0, len(profileMappings))
+	for alias := range profileMappings {
+		aliases = append(aliases, alias)
+	}
+	sort.Strings(aliases)
+	for _, alias := range aliases {
+		if s.getProfileID(alias) == requested {
+			return alias
+		}
+	}
+	return requested
+}
+
+// discoveredProfileID maps a short ID advertised by DiscoverProfiles back to
+// its exact XCCDF ID. No fallback: an unknown ID must not scan another profile.
+func (s *OpenSCAPScanner) discoveredProfileID(contentFile, shortID string) string {
+	if contentFile == "" || shortID == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, oscapBinary, "info", "--profiles", contentFile).Output()
+	if err != nil {
+		s.logger.WithError(err).Debug("Could not list profiles from content")
+		return ""
+	}
+	return matchDiscoveredProfile(string(output), shortID, s.createShortID)
+}
+
+func matchDiscoveredProfile(oscapInfoOutput, shortID string, shorten func(string) string) string {
+	for _, line := range strings.Split(oscapInfoOutput, "\n") {
+		id := strings.TrimSpace(strings.SplitN(line, ":", 2)[0])
+		if id != "" && shorten(id) == shortID {
+			return id
 		}
 	}
 	return ""
@@ -1137,11 +1252,14 @@ func (s *OpenSCAPScanner) RunScanWithOptions(ctx context.Context, options *model
 	}
 
 	profileID := s.getProfileID(options.ProfileID)
+	if profileID != "" {
+		profileID = s.getProfileIDFromContent(contentFile, profileID)
+	} else {
+		profileID = s.discoveredProfileID(contentFile, options.ProfileID)
+	}
 	if profileID == "" {
 		return nil, fmt.Errorf("profile %s not available for %s", options.ProfileID, s.osInfo.Name)
 	}
-	// Resolve to the profile ID actually in the content (e.g. Debian 13 datastream may use different IDs)
-	profileID = s.getProfileIDFromContent(contentFile, profileID)
 
 	// Create temp file for results
 	resultsFile, err := os.CreateTemp("", "oscap-results-*.xml")
@@ -1297,7 +1415,7 @@ func (s *OpenSCAPScanner) RunScanWithOptions(ctx context.Context, options *model
 	}
 
 	// Parse results (pass oscap output and content file for metadata)
-	scan, err := s.parseResults(resultsPath, contentFile, options.ProfileID, string(output))
+	scan, err := s.parseResults(resultsPath, contentFile, s.reportedProfileName(options.ProfileID), string(output))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse results: %w", err)
 	}
@@ -1436,12 +1554,13 @@ func (s *OpenSCAPScanner) parseResults(resultsPath string, contentFile string, p
 		"benchmark_content_len": len(benchmarkContent),
 	})).Info("Starting metadata extraction")
 
-	ruleMetadataMap := s.extractRuleMetadata(resultsContent)
+	xccdfValues := extractXCCDFValues(benchmarkContent, resultsContent)
+	ruleMetadataMap := s.extractRuleMetadata(resultsContent, xccdfValues)
 	s.logger.WithField("rules_from_results", len(ruleMetadataMap)).Info("Extracted metadata from results file")
 
 	if len(ruleMetadataMap) == 0 && benchmarkContent != "" {
 		s.logger.Info("No metadata in results file, extracting from benchmark datastream")
-		ruleMetadataMap = s.extractRuleMetadata(benchmarkContent)
+		ruleMetadataMap = s.extractRuleMetadata(benchmarkContent, xccdfValues)
 		s.logger.WithField("rules_from_benchmark", len(ruleMetadataMap)).Info("Extracted metadata from benchmark file")
 	}
 
@@ -1667,7 +1786,7 @@ func (s *OpenSCAPScanner) parseActualExpected(finding string, _ string) (actual,
 }
 
 // extractRuleMetadata extracts rule definitions from the embedded benchmark in XCCDF results
-func (s *OpenSCAPScanner) extractRuleMetadata(content string) map[string]ruleMetadata {
+func (s *OpenSCAPScanner) extractRuleMetadata(content string, values map[string]string) map[string]ruleMetadata {
 	metadata := make(map[string]ruleMetadata)
 
 	// Extract Rule elements using a more robust approach:
@@ -1795,11 +1914,11 @@ func (s *OpenSCAPScanner) extractRuleMetadata(content string) map[string]ruleMet
 
 		// Extract fix/remediation - prefer shell script fix, then any fix, then fixtext
 		if fixShMatch := fixShPattern.FindStringSubmatch(ruleContent); len(fixShMatch) >= 3 {
-			meta.Remediation = s.cleanXMLText(fixShMatch[2])
+			meta.Remediation = cleanRemediationText(fixShMatch[2], values)
 		}
 		if meta.Remediation == "" {
 			if fixMatch := fixPattern.FindStringSubmatch(ruleContent); len(fixMatch) >= 3 {
-				meta.Remediation = s.cleanXMLText(fixMatch[2])
+				meta.Remediation = cleanRemediationText(fixMatch[2], values)
 			}
 		}
 		if meta.Remediation == "" {
@@ -1850,6 +1969,58 @@ func (s *OpenSCAPScanner) extractRuleMetadata(content string) map[string]ruleMet
 	})).Info("Extracted rule metadata summary")
 
 	return metadata
+}
+
+var (
+	xccdfValueBlockPattern   = regexp.MustCompile(`<(?:[\w.-]+:)?Value\s[^>]*\bid="([^"]+)"[^>]*>([\s\S]*?)</(?:[\w.-]+:)?Value>`)
+	xccdfDefaultValuePattern = regexp.MustCompile(`<(?:[\w.-]+:)?value>([^<]*)</(?:[\w.-]+:)?value>`)
+	xccdfSetValuePattern     = regexp.MustCompile(`<(?:[\w.-]+:)?set-value\s[^>]*\bidref="([^"]+)"[^>]*>([^<]*)</`)
+	xccdfSubPattern          = regexp.MustCompile(`<(?:[\w.-]+:)?sub\s[^>]*\bidref="([^"]+)"[^>]*?(?:/>|>\s*</(?:[\w.-]+:)?sub>)`)
+	xmlTagPattern            = regexp.MustCompile(`<[^>]+>`)
+)
+
+// extractXCCDFValues returns each Value's default, overridden by the
+// set-value oscap records for the evaluated profile. Values stay XML-escaped.
+func extractXCCDFValues(contents ...string) map[string]string {
+	values := make(map[string]string)
+	for _, content := range contents {
+		for _, m := range xccdfValueBlockPattern.FindAllStringSubmatch(content, -1) {
+			if def := xccdfDefaultValuePattern.FindStringSubmatch(m[2]); def != nil {
+				if _, seen := values[m[1]]; !seen {
+					values[m[1]] = def[1]
+				}
+			}
+		}
+	}
+	for _, content := range contents {
+		for _, m := range xccdfSetValuePattern.FindAllStringSubmatch(content, -1) {
+			values[m[1]] = m[2]
+		}
+	}
+	return values
+}
+
+// cleanRemediationText turns an XCCDF <fix> body into the script oscap would
+// run: placeholders resolved, markup removed, line breaks kept.
+func cleanRemediationText(text string, values map[string]string) string {
+	text = xccdfSubPattern.ReplaceAllStringFunc(text, func(tag string) string {
+		idref := xccdfSubPattern.FindStringSubmatch(tag)[1]
+		if v, ok := values[idref]; ok {
+			return v
+		}
+		return "UNRESOLVED:" + strings.TrimPrefix(idref, "xccdf_org.ssgproject.content_value_")
+	})
+	text = xmlTagPattern.ReplaceAllString(text, "")
+	text = html.UnescapeString(text)
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.Map(func(r rune) rune {
+		if (r < 0x20 && r != '\n' && r != '\t') || r == 0x7f ||
+			(r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
+			return -1
+		}
+		return r
+	}, text)
+	return strings.Trim(text, " \t\n")
 }
 
 // cleanXMLText removes HTML/XML tags and cleans up whitespace

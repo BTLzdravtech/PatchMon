@@ -24,6 +24,7 @@ import {
 import { useMemo, useState } from "react";
 import { SiDiscord, SiNtfy } from "react-icons/si";
 import { Link } from "react-router-dom";
+import ModalPortal from "../../components/ui/ModalPortal";
 import { useAuth } from "../../contexts/AuthContext";
 import { useConfirm } from "../../contexts/ConfirmContext";
 import { useToast } from "../../contexts/ToastContext";
@@ -76,6 +77,14 @@ const EVENT_TYPES = [
 	{ value: "user_login", label: "User login" },
 	{ value: "user_login_failed", label: "Failed login attempt" },
 	{ value: "account_locked", label: "Account locked" },
+	{
+		value: "sso_fallback_login",
+		label: "Password login during SSO outage",
+	},
+	{
+		value: "sso_fallback_refused",
+		label: "Password login refused during SSO outage",
+	},
 	{ value: "user_created", label: "User created" },
 	{ value: "user_role_changed", label: "User role changed" },
 	{ value: "user_tfa_disabled", label: "2FA disabled" },
@@ -670,9 +679,9 @@ const DestinationModal = ({
 		}
 	};
 
-	return (
+	const modal = (
 		<div
-			className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+			className="fixed inset-0 bg-black/50 flex items-center justify-center z-[120]"
 			onClick={onClose}
 		>
 			<div
@@ -832,6 +841,8 @@ const DestinationModal = ({
 			</div>
 		</div>
 	);
+
+	return <ModalPortal>{modal}</ModalPortal>;
 };
 
 /* ───────────────── Route Modal ───────────────── */
@@ -916,9 +927,9 @@ const RouteModal = ({
 
 	const allEvents = form.event_types.includes("*");
 
-	return (
+	const modal = (
 		<div
-			className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+			className="fixed inset-0 bg-black/50 flex items-center justify-center z-[120]"
 			onClick={onClose}
 		>
 			<div
@@ -1086,6 +1097,8 @@ const RouteModal = ({
 			</div>
 		</div>
 	);
+
+	return <ModalPortal>{modal}</ModalPortal>;
 };
 
 /* ───────────────── Report Modal ───────────────── */
@@ -1197,9 +1210,9 @@ const ReportModal = ({
 		});
 	};
 
-	return (
+	const modal = (
 		<div
-			className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+			className="fixed inset-0 bg-black/50 flex items-center justify-center z-[120]"
 			onClick={onClose}
 		>
 			<div
@@ -1441,6 +1454,8 @@ const ReportModal = ({
 			</div>
 		</div>
 	);
+
+	return <ModalPortal>{modal}</ModalPortal>;
 };
 
 /* ───────────────── Main Page ───────────────── */

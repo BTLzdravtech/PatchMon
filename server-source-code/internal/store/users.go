@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/PatchMon/PatchMon/server-source-code/internal/database"
@@ -10,6 +11,7 @@ import (
 	"github.com/PatchMon/PatchMon/server-source-code/internal/pgtime"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/safeconv"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // UsersStore provides user access.
@@ -124,14 +126,17 @@ func (s *UsersStore) GetByOidcSubOrEmail(ctx context.Context, oidcSub, email str
 
 // CreateOidcUser creates a new user from OIDC claims.
 func (s *UsersStore) CreateOidcUser(ctx context.Context, u *models.User, oidcSub, oidcProvider string, avatarURL *string) error {
-	d := s.db.DB(ctx)
+	return s.db.DB(ctx).Queries.CreateOidcUser(ctx, oidcUserParams(u, oidcSub, oidcProvider, avatarURL))
+}
+
+func oidcUserParams(u *models.User, oidcSub, oidcProvider string, avatarURL *string) db.CreateOidcUserParams {
 	if u.ID == "" {
 		u.ID = uuid.New().String()
 	}
 	now := time.Now()
 	u.CreatedAt = now
 	u.UpdatedAt = now
-	arg := db.CreateOidcUserParams{
+	return db.CreateOidcUserParams{
 		ID:           u.ID,
 		Username:     u.Username,
 		Email:        u.Email,
@@ -144,7 +149,6 @@ func (s *UsersStore) CreateOidcUser(ctx context.Context, u *models.User, oidcSub
 		OidcProvider: &oidcProvider,
 		AvatarUrl:    avatarURL,
 	}
-	return d.Queries.CreateOidcUser(ctx, arg)
 }
 
 // UpdateOidcLink links OIDC to an existing user.
@@ -156,6 +160,18 @@ func (s *UsersStore) UpdateOidcLink(ctx context.Context, userID, oidcSub, oidcPr
 		OidcProvider: &oidcProvider,
 		AvatarUrl:    avatarURL,
 	})
+}
+
+// UpdateOidcProvider records the issuer a user's OIDC subject belongs to.
+func (s *UsersStore) UpdateOidcProvider(ctx context.Context, userID, oidcProvider string) error {
+	d := s.db.DB(ctx)
+	return d.Queries.UpdateUserOidcProvider(ctx, db.UpdateUserOidcProviderParams{ID: userID, OidcProvider: &oidcProvider})
+}
+
+// ClearOidcLink removes a user's OIDC subject binding.
+func (s *UsersStore) ClearOidcLink(ctx context.Context, userID string) error {
+	d := s.db.DB(ctx)
+	return d.Queries.ClearUserOidcLink(ctx, userID)
 }
 
 // UpdateOidcProfile updates user profile from OIDC (last_login, avatar, name, role).
@@ -207,14 +223,17 @@ func (s *UsersStore) CountAdmins(ctx context.Context) (int, error) {
 
 // Create creates a new user.
 func (s *UsersStore) Create(ctx context.Context, u *models.User) error {
-	d := s.db.DB(ctx)
+	return s.db.DB(ctx).Queries.CreateUser(ctx, userParams(u))
+}
+
+func userParams(u *models.User) db.CreateUserParams {
 	if u.ID == "" {
 		u.ID = uuid.New().String()
 	}
 	now := time.Now()
 	u.CreatedAt = now
 	u.UpdatedAt = now
-	arg := db.CreateUserParams{
+	return db.CreateUserParams{
 		ID:              u.ID,
 		Username:        u.Username,
 		Email:           u.Email,
@@ -229,14 +248,16 @@ func (s *UsersStore) Create(ctx context.Context, u *models.User) error {
 		ThemePreference: u.ThemePreference,
 		ColorTheme:      u.ColorTheme,
 	}
-	return d.Queries.CreateUser(ctx, arg)
 }
 
 // Update updates a user.
 func (s *UsersStore) Update(ctx context.Context, u *models.User) error {
-	d := s.db.DB(ctx)
+	return s.db.DB(ctx).Queries.UpdateUser(ctx, updateUserParams(u))
+}
+
+func updateUserParams(u *models.User) db.UpdateUserParams {
 	u.UpdatedAt = time.Now()
-	arg := db.UpdateUserParams{
+	return db.UpdateUserParams{
 		Username:        u.Username,
 		Email:           u.Email,
 		Role:            u.Role,
@@ -248,13 +269,20 @@ func (s *UsersStore) Update(ctx context.Context, u *models.User) error {
 		ColorTheme:      u.ColorTheme,
 		ID:              u.ID,
 	}
-	return d.Queries.UpdateUser(ctx, arg)
 }
 
 // UpdatePassword updates a user's password hash.
 func (s *UsersStore) UpdatePassword(ctx context.Context, userID, hash string) error {
 	d := s.db.DB(ctx)
 	return d.Queries.UpdatePassword(ctx, db.UpdatePasswordParams{PasswordHash: &hash, ID: userID})
+}
+
+// UpgradePasswordHash replaces oldHash only if it is still the stored hash, so a
+// rehash cannot overwrite a password changed in the meantime.
+func (s *UsersStore) UpgradePasswordHash(ctx context.Context, userID, oldHash, newHash string) (bool, error) {
+	d := s.db.DB(ctx)
+	n, err := d.Queries.UpgradePasswordHash(ctx, db.UpgradePasswordHashParams{NewHash: &newHash, ID: userID, OldHash: &oldHash})
+	return n == 1, err
 }
 
 // UpdateLastLogin records the time of a successful sign-in.
@@ -414,4 +442,56 @@ func (s *UsersStore) UpdateDiscordProfile(ctx context.Context, userID string, la
 // SetNewsletterSubscribed marks the user as subscribed to the newsletter and stamps the timestamp.
 func (s *UsersStore) SetNewsletterSubscribed(ctx context.Context, userID string) error {
 	return s.db.DB(ctx).Queries.SetNewsletterSubscribed(ctx, userID)
+}
+
+// AdminResetTfa clears TFA, flags local accounts for re-enrolment, revokes sessions and trusted
+// devices, optionally sets a temporary password, and writes the audit row in one transaction.
+// reset is false, changing nothing, when TFA was off.
+func (s *UsersStore) AdminResetTfa(ctx context.Context, userID string, tempPasswordHash *string, audit AuditEntry) (reset, enrolmentRequired bool, err error) {
+	d := s.db.DB(ctx)
+	tx, err := d.Begin(ctx)
+	if err != nil {
+		return false, false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	q := d.Queries.WithTx(tx)
+	enrolmentRequired, err = q.ResetUserTfa(ctx, userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	if tempPasswordHash != nil {
+		if err := q.SetTemporaryPassword(ctx, db.SetTemporaryPasswordParams{ID: userID, PasswordHash: tempPasswordHash}); err != nil {
+			return false, false, err
+		}
+	}
+	if err := q.RevokeAllTrustedDevicesForUser(ctx, userID); err != nil {
+		return false, false, err
+	}
+	if err := q.RevokeAllSessionsForUser(ctx, userID); err != nil {
+		return false, false, err
+	}
+	if audit.Metadata == nil {
+		audit.Metadata = map[string]any{}
+	}
+	audit.Metadata["enrolment_required"] = enrolmentRequired
+	audit.Metadata["temporary_password"] = tempPasswordHash != nil
+	if err := insertAuditLog(ctx, q, audit); err != nil {
+		return false, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, false, err
+	}
+	return true, enrolmentRequired, nil
+}
+
+// ConsumeTfaBackupCode swaps the stored backup codes only if they still equal oldCodes, so
+// two requests racing on one code cannot both succeed.
+func (s *UsersStore) ConsumeTfaBackupCode(ctx context.Context, userID, oldCodes, newCodes string) (bool, error) {
+	d := s.db.DB(ctx)
+	n, err := d.Queries.ConsumeTfaBackupCode(ctx, db.ConsumeTfaBackupCodeParams{ID: userID, OldCodes: oldCodes, NewCodes: &newCodes})
+	return n == 1, err
 }

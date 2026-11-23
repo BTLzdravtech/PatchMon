@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -185,6 +186,14 @@ func (h *AutoPatchDispatchHandler) ProcessTask(ctx context.Context, _ *asynq.Tas
 			// triggeredByUserID nil = system-initiated; visible in Runs &
 			// History without a username, with the snapshot marking it auto.
 			if _, cErr := h.patchRuns.CreateRun(ctx, runID, host.ID, "patch-run-"+runID, "patch_all", nil, nil, nil, false, nil, &p.ID, &p.Name, snapshot, nil); cErr != nil {
+				// The unique index on active runs is the authority; the
+				// activeHosts snapshot above can be stale by the time we insert.
+				if errors.Is(cErr, store.ErrHostHasActivePatchRun) {
+					h.log.Debug("auto_patch: host skipped", "policy", p.Name, "host_id", host.ID, "reason", "patch run already queued or running")
+					activeHosts[host.ID] = struct{}{}
+					skipped++
+					continue
+				}
 				h.log.Error("auto_patch: create run failed", "policy", p.Name, "host_id", host.ID, "error", cErr)
 				continue
 			}

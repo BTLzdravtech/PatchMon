@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,6 +29,7 @@ type OSReleaseInfo struct {
 	ID              string
 	IDLike          string
 	VersionCodename string
+	BuildID         string
 }
 
 // Detector handles system information detection
@@ -87,6 +89,8 @@ func (d *Detector) parseOSRelease() (*OSReleaseInfo, error) {
 			info.IDLike = value
 		case "VERSION_CODENAME":
 			info.VersionCodename = value
+		case "BUILD_ID":
+			info.BuildID = value
 		}
 	}
 
@@ -161,10 +165,60 @@ func (d *Detector) getFreeBSDInfo() (osType, osVersion string, err error) {
 	return osType, osVersion, nil
 }
 
-// gopsutil returns DisplayVersion as PlatformVersion, and it is absent before
-// Server 2022, so 2016 and 2019 LTSC need the ReleaseId fallback.
-func resolveWindowsOSVersion(platformVersion, releaseID, kernelVersion string) string {
-	for _, v := range []string{platformVersion, releaseID, kernelVersion} {
+var windowsServerYears = map[int]string{
+	14393: "2016",
+	17763: "2019",
+	20348: "2022",
+	26100: "2025",
+}
+
+// windowsBuild reads the build from gopsutil's KernelVersion, e.g. "10.0.20348.2762 Build 20348.2762".
+func windowsBuild(kernelVersion string) int {
+	version, _, _ := strings.Cut(kernelVersion, " ")
+	fields := strings.Split(version, ".")
+	if len(fields) < 3 {
+		return 0
+	}
+	build, err := strconv.Atoi(fields[2])
+	if err != nil {
+		return 0
+	}
+	return build
+}
+
+// Desktop builds share the Server build numbers, so only a Server product type gets a year.
+func resolveWindowsOSVersion(platformFamily, platformVersion, releaseID, kernelVersion string) string {
+	feature := platformVersion
+	if feature == "" {
+		feature = releaseID
+	}
+	if strings.HasPrefix(platformFamily, "Server") {
+		if year, ok := windowsServerYears[windowsBuild(kernelVersion)]; ok {
+			if feature == "" {
+				return "Server " + year
+			}
+			return "Server " + year + " (" + feature + ")"
+		}
+		if feature != "" {
+			return "Server " + feature
+		}
+	}
+	for _, v := range []string{feature, kernelVersion} {
+		if v != "" {
+			return v
+		}
+	}
+	return "Unknown"
+}
+
+// Alpine has no VERSION, only VERSION_ID. Arch has BUILD_ID=rolling, and its container
+// images add a VERSION_ID that is only the image build date.
+func resolveLinuxOSVersion(info *OSReleaseInfo, alpineRelease string) string {
+	rolling := ""
+	if info.BuildID == "rolling" {
+		rolling = info.BuildID
+	}
+	for _, v := range []string{info.Version, rolling, info.VersionID, alpineRelease, info.BuildID} {
 		if v != "" {
 			return v
 		}
@@ -182,7 +236,7 @@ func (d *Detector) DetectOS() (osType, osVersion string, err error) {
 		if infoErr != nil {
 			return "Windows", "Unknown", nil
 		}
-		return "Windows", resolveWindowsOSVersion(info.PlatformVersion, windowsReleaseID(), info.KernelVersion), nil
+		return "Windows", resolveWindowsOSVersion(info.PlatformFamily, info.PlatformVersion, windowsReleaseID(), info.KernelVersion), nil
 	}
 	// Check for FreeBSD first (doesn't have /etc/os-release)
 	if d.isFreeBSD() {
@@ -219,10 +273,15 @@ func (d *Detector) DetectOS() (osType, osVersion string, err error) {
 		osType = "Unknown"
 	}
 
-	// Use VERSION for OS version (e.g., "22.04 LTS", "12 (bookworm)", "10.0 (Red Quartz)")
-	osVersion = osReleaseInfo.Version
-	if osVersion == "" {
-		osVersion = "Unknown"
+	alpineRelease := ""
+	if osReleaseInfo.Version == "" && osReleaseInfo.VersionID == "" {
+		if data, err := os.ReadFile(alpineReleaseFile); err == nil {
+			alpineRelease = strings.TrimSpace(string(data))
+		}
+	}
+	osVersion = resolveLinuxOSVersion(osReleaseInfo, alpineRelease)
+	if release := ucsRelease(lsbReleaseFile); release != "" {
+		osType, osVersion = ucsOSType, release
 	}
 
 	d.logger.WithFields(logrus.Fields{
@@ -294,6 +353,22 @@ func (d *Detector) GetHostname() (string, error) {
 	return info.Hostname, nil
 }
 
+func selectPrimaryIPAddress(ips []net.IP) string {
+	var ipv6Fallback string
+	for _, ip := range ips {
+		if !ip.IsGlobalUnicast() {
+			continue
+		}
+		if ip.To4() != nil {
+			return ip.String()
+		}
+		if ipv6Fallback == "" {
+			ipv6Fallback = ip.String()
+		}
+	}
+	return ipv6Fallback
+}
+
 // GetIPAddress gets the primary IP address using network interfaces
 func (d *Detector) GetIPAddress() string {
 	interfaces, err := net.Interfaces()
@@ -301,6 +376,8 @@ func (d *Detector) GetIPAddress() string {
 		d.logger.WithError(err).Warn("Failed to get network interfaces")
 		return ""
 	}
+
+	var ips []net.IP
 
 	for _, iface := range interfaces {
 		// Skip loopback and down interfaces
@@ -315,14 +392,12 @@ func (d *Detector) GetIPAddress() string {
 
 		for _, addr := range addrs {
 			if ipnet, ok := addr.(*net.IPNet); ok {
-				if ipnet.IP.To4() != nil && !ipnet.IP.IsLoopback() {
-					return ipnet.IP.String()
-				}
+				ips = append(ips, ipnet.IP)
 			}
 		}
 	}
 
-	return ""
+	return selectPrimaryIPAddress(ips)
 }
 
 // GetKernelVersion gets the kernel version

@@ -1,6 +1,6 @@
 # PatchMon Agent Installation Script for Windows (Server-Provided Version)
 # The server injects PATCHMON_SERVER_URL, PATCHMON_BOOTSTRAP_TOKEN, PATCHMON_IGNORE_SSL
-# as env vars at the top of this script before serving it.
+# and PATCHMON_HOST_ID as env vars at the top of this script before serving it.
 
 $ErrorActionPreference = "Stop"
 
@@ -84,6 +84,14 @@ $APIKey        = $env:PATCHMON_API_KEY
 $InstallPath   = "C:\Program Files\PatchMon"
 $ConfigPath    = "C:\ProgramData\PatchMon"
 $SkipSslVerify = ($env:PATCHMON_IGNORE_SSL -eq "true" -or $env:PATCHMON_IGNORE_SSL -eq "1")
+$HostId        = if ($env:PATCHMON_HOST_ID -match '^[A-Za-z0-9-]{1,64}$') { $env:PATCHMON_HOST_ID } else { "" }
+
+# Check if running as Administrator
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Write-Error "This script must be run as Administrator. Right-click PowerShell and select 'Run as Administrator'."
+    exit 1
+}
 
 # Honor server's ignore SSL setting (injected when Settings > Agent Updates > Ignore SSL is enabled)
 if ($SkipSslVerify) {
@@ -106,16 +114,15 @@ if ($BootstrapToken -and $ServerURL) {
         }
         Write-Host "Credentials received successfully." -ForegroundColor Green
     } catch {
+        $serverResponse = $_.ErrorDetails.Message
+        if ($serverResponse -match '"code"\s*:\s*"(cors_mismatch|host_mismatch)"') {
+            Write-Host "Server response: $serverResponse"
+            Write-Error "The PatchMon server rejected the URL this host used ($($Matches[1])). The hostname in Settings > Server URL must be listed in CORS_ORIGIN."
+            exit 1
+        }
         Write-Error "Failed to fetch credentials: $($_.Exception.Message). Bootstrap token may have expired. Please request a new installation script."
         exit 1
     }
-}
-
-# Check if running as Administrator
-$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    Write-Error "This script must be run as Administrator. Right-click PowerShell and select 'Run as Administrator'."
-    exit 1
 }
 
 Write-Host "PatchMon Agent Installation for Windows" -ForegroundColor Green
@@ -149,7 +156,8 @@ Write-Host "Downloading agent from PatchMon server: $downloadURL" -ForegroundCol
 
 $binaryName = "patchmon-agent.exe"
 $targetPath = Join-Path $InstallPath $binaryName
-$tempPath = Join-Path $env:TEMP "patchmon-agent-windows-${arch}.exe"
+# PowerShell 5.1 cannot delete via an 8.3 TEMP path whose profile folder name has a dot, so use the long path.
+$tempPath = Join-Path (Get-Item -LiteralPath $env:TEMP).FullName "patchmon-agent-windows-${arch}.exe"
 
 Write-Host "Architecture: $arch" -ForegroundColor Cyan
 Write-Host "Install Path: $InstallPath" -ForegroundColor Cyan
@@ -163,6 +171,22 @@ New-Item -ItemType Directory -Force -Path $InstallPath | Out-Null
 # Create config directory
 Write-Host "Creating configuration directory..." -ForegroundColor Yellow
 New-Item -ItemType Directory -Force -Path $ConfigPath | Out-Null
+
+# Lock the config dir to SYSTEM and Administrators before any secret is written.
+# No /T on the /inheritance:r line: it empties the ACL of existing files, so they are reset below instead.
+Write-Host "Securing configuration directory..." -ForegroundColor Yellow
+try {
+    & icacls $ConfigPath /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" | Out-Null
+    $aclFailed = $LASTEXITCODE -ne 0
+    foreach ($file in Get-ChildItem -LiteralPath $ConfigPath -File -Force) {
+        & icacls $file.FullName /reset /C | Out-Null
+        if ($LASTEXITCODE -ne 0) { $aclFailed = $true }
+    }
+    & icacls $ConfigPath /setowner "*S-1-5-32-544" /T /C | Out-Null
+    if ($aclFailed -or $LASTEXITCODE -ne 0) { throw "icacls reported a non-zero exit" }
+} catch {
+    Write-Warning "Could not fully secure $ConfigPath. Credentials may be readable by other local users until permissions are corrected."
+}
 
 # Download the binary from the server
 Write-Host "Downloading PatchMon agent..." -ForegroundColor Yellow
@@ -200,7 +224,11 @@ Copy-Item -Path $tempPath -Destination $targetPath -Force
 Unblock-File -Path $targetPath -ErrorAction SilentlyContinue
 
 # Clean up temp file
-Remove-Item -Path $tempPath -Force
+try {
+    Remove-Item -LiteralPath $tempPath -Force
+} catch {
+    Write-Warning "Could not delete the temporary file $tempPath. It is safe to delete it by hand."
+}
 
 # Create or update config file - ensure skip_ssl_verify reflects server settings
 $configFile = Join-Path $ConfigPath "config.yml"
@@ -216,6 +244,7 @@ credentials_file: '$($ConfigPath -replace "'", "''")\credentials.yml'
 log_file: '$($ConfigPath -replace "'", "''")\patchmon-agent.log'
 log_level: 'info'
 skip_ssl_verify: $($SkipSslVerify.ToString().ToLower())
+host_id: '$HostId'
 "@
     Set-Content -Path $configFile -Value $configContent -Encoding UTF8
 } else {
@@ -253,8 +282,15 @@ if ($ServerURL -and $APIID -and $APIKey) {
     if ($SkipSslVerify) {
         $env:PATCHMON_SKIP_SSL_VERIFY = "true"
     }
+    $setApiArgs = @("--config", $configFile, "config", "set-api", $APIID, $APIKey, $ServerURL)
     try {
-        Invoke-AgentBinary -Path $targetPath -AgentArgs @("--config", $configFile, "config", "set-api", $APIID, $APIKey, $ServerURL)
+        if ($HostId) {
+            Invoke-AgentBinary -Path $targetPath -AgentArgs ($setApiArgs + @("--host-id", $HostId))
+        }
+        # An agent older than 2.1.4 rejects --host-id; it learns the host ID later instead.
+        if (-not $HostId -or $LASTEXITCODE -ne 0) {
+            Invoke-AgentBinary -Path $targetPath -AgentArgs $setApiArgs
+        }
     } catch {
         Show-AgentLaunchFailure -Path $targetPath -InstallDir $InstallPath -ConfigFile $configFile -Reason $_.Exception.Message
         exit 1
