@@ -952,12 +952,15 @@ const Hosts = () => {
 	});
 	const selectedHostRecords = useMemo(() => {
 		if (selectedHosts.length === 0) return [];
-		const source =
-			selectedHostDetails && selectedHostDetails.length > 0
-				? selectedHostDetails
-				: hosts || [];
-		return source.filter((h) => selectedHostsSet.has(h.id));
-	}, [selectedHostDetails, hosts, selectedHosts, selectedHostsSet]);
+		// While a changed selection is refetching, selectedHostDetails is still
+		// the previous selection (keepPreviousData), so it lacks the host that
+		// was just ticked. Fill the gap from the current page, where that host
+		// almost always is, so counts derived from this list do not flicker.
+		const byId = new Map();
+		for (const h of hosts || []) byId.set(h.id, h);
+		for (const h of selectedHostDetails || []) byId.set(h.id, h);
+		return selectedHosts.map((id) => byId.get(id)).filter(Boolean);
+	}, [selectedHostDetails, hosts, selectedHosts]);
 
 	// Hosts the bulk patch flow can actually target. Windows hosts are excluded
 	// because the agent does not patch them; the wizard would also drop them,
@@ -973,8 +976,10 @@ const Hosts = () => {
 				})),
 		[selectedHostRecords],
 	);
+	// Counts hosts known to be unpatchable, not "selected minus patchable": a
+	// selected host whose details are still loading is not a skipped host.
 	const bulkPatchSkippedCount =
-		selectedHosts.length - bulkPatchablePresetHosts.length;
+		selectedHostRecords.length - bulkPatchablePresetHosts.length;
 	// Hosts in the current selection that the agent has flagged as needing a
 	// reboot. Bulk reboot only acts on these — we never reboot a host that
 	// didn't ask for it, even if the operator selected it by accident. The
