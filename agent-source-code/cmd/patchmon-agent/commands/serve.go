@@ -514,7 +514,7 @@ func runServiceLoop(stopCh <-chan struct{}) error {
 					defer endPatchRun()
 					var err error
 					if runtime.GOOS == "windows" {
-						err = runPatchWindows(msg.patchRunID, msg.windowsPatch, msg.patchParseError)
+						err = runPatchWindowsWithReboot(msg.patchRunID, msg.windowsPatch, msg.patchParseError, msg.rebootIfRequired)
 					} else {
 						err = runPatch(msg.patchRunID, msg.patchType, msg.packageNames, msg.dryRun, msg.rebootIfRequired)
 					}
@@ -2014,14 +2014,17 @@ func connectOnce(out chan<- wsMsg, backoff *time.Duration) (connected bool, err 
 					"include_updates": req.IncludeUpdates,
 					"include_apps":    req.IncludeApps,
 					"dry_run":         payload.DryRun,
+					// Fork: policy reboot flag, see runPatchWindowsWithReboot.
+					"reboot_if_required": payload.RebootIfRequired,
 				})).Info("run_patch received")
 				dispatchWSMessage(out, wsMsg{
-					kind:            "run_patch",
-					patchRunID:      payload.PatchRunID,
-					patchType:       patchType,
-					dryRun:          payload.DryRun,
-					windowsPatch:    req,
-					patchParseError: parseErr,
+					kind:             "run_patch",
+					patchRunID:       payload.PatchRunID,
+					patchType:        patchType,
+					dryRun:           payload.DryRun,
+					rebootIfRequired: payload.RebootIfRequired,
+					windowsPatch:     req,
+					patchParseError:  parseErr,
 				})
 				continue
 			}
@@ -3034,23 +3037,15 @@ func runPatch(patchRunID, patchType string, packageNames []string, dryRun, reboo
 		return errPatchRunStopped
 	}
 
-	// Policy-driven post-patch reboot (Linux/BSD; the Windows path returned
-	// earlier). Only after a fully successful, non-dry, non-stopped run, and
+	// Policy-driven post-patch reboot (Linux/BSD; Windows applies the same
+	// rule in runPatchWindowsWithReboot). Only after a fully successful, non-dry, non-stopped run, and
 	// only if the host still reports a pending reboot — patching that didn't
 	// touch the kernel/libc leaves the box up. Ordered after the post-patch
 	// report so the refreshed inventory reaches the server before the
 	// connection drops. 1-minute delay gives logged-in users the wall notice
 	// and lets the final WS/HTTP exchanges drain.
 	if rebootIfRequired && !dryRun {
-		detector := system.New(logger)
-		if needs, reason := detector.CheckRebootRequired(); needs {
-			logger.WithField("reason", reason).Info("Post-patch reboot required by policy; scheduling reboot")
-			if err := detector.ExecuteReboot(1, "PatchMon post-patch reboot (policy)"); err != nil {
-				logger.WithError(err).Warn("Post-patch reboot scheduling failed")
-			}
-		} else {
-			logger.Info("Post-patch reboot requested by policy but host does not need one; skipping")
-		}
+		rebootAfterPatchIfRequired()
 	}
 	return nil
 }

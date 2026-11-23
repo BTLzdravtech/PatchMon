@@ -13,6 +13,7 @@ import (
 	"github.com/PatchMon/PatchMon/server-source-code/internal/database"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/db"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/store"
+	"github.com/PatchMon/PatchMon/server-source-code/internal/util"
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 )
@@ -21,6 +22,34 @@ import (
 // dispatcher will still fire. Covers short server downtime around the slot
 // without surprising operators with a patch run hours after the window.
 const autoPatchFireTolerance = 30 * time.Minute
+
+// MinWindowsAutoPatchAgentVersion is the oldest agent that may be sent a
+// Windows patch run. It mirrors handler.MinWindowsPatchAgentVersion, which
+// this package cannot import (handler imports queue); a test in the handler
+// package keeps the two equal.
+const MinWindowsAutoPatchAgentVersion = "2.1.4"
+
+// autoPatchRunOpts returns the run options an automated patch_all needs for
+// this host, or a non-empty reason to skip it.
+//
+// Windows hosts get Windows Updates only: unattended app upgrades through
+// winget are left to an operator. Linux and BSD hosts need no options.
+func autoPatchRunOpts(osType string, agentVersion *string) (*store.CreateRunOpts, string) {
+	if !store.IsWindowsOSType(osType) {
+		return nil, ""
+	}
+	v := ""
+	if agentVersion != nil {
+		v = *agentVersion
+	}
+	// The "-0" floor admits pre-releases of the minimum version, as the
+	// manual trigger path does.
+	if v == "" || util.CompareVersions(v, MinWindowsAutoPatchAgentVersion+"-0") < 0 {
+		return nil, "windows agent older than v" + MinWindowsAutoPatchAgentVersion
+	}
+	updates, apps := true, false
+	return &store.CreateRunOpts{WindowsIncludeUpdates: &updates, WindowsIncludeApps: &apps}, ""
+}
 
 // AutoPatchDispatchHandler fires patch_all runs for policies whose automated
 // schedule (auto_patch_enabled + auto_patch_days + auto_patch_time) is due.
@@ -164,8 +193,9 @@ func (h *AutoPatchDispatchHandler) ProcessTask(ctx context.Context, _ *asynq.Tas
 				skipped++
 				continue
 			}
-			if strings.Contains(strings.ToLower(host.OSType), "windows") {
-				h.log.Debug("auto_patch: host skipped", "policy", p.Name, "host_id", host.ID, "reason", "windows host")
+			runOpts, skipReason := autoPatchRunOpts(host.OSType, host.AgentVersion)
+			if skipReason != "" {
+				h.log.Info("auto_patch: host skipped", "policy", p.Name, "host_id", host.ID, "reason", skipReason)
 				skipped++
 				continue
 			}
@@ -185,7 +215,7 @@ func (h *AutoPatchDispatchHandler) ProcessTask(ctx context.Context, _ *asynq.Tas
 			})
 			// triggeredByUserID nil = system-initiated; visible in Runs &
 			// History without a username, with the snapshot marking it auto.
-			if _, cErr := h.patchRuns.CreateRun(ctx, runID, host.ID, "patch-run-"+runID, "patch_all", nil, nil, nil, false, nil, &p.ID, &p.Name, snapshot, nil); cErr != nil {
+			if _, cErr := h.patchRuns.CreateRun(ctx, runID, host.ID, "patch-run-"+runID, "patch_all", nil, nil, nil, false, nil, &p.ID, &p.Name, snapshot, runOpts); cErr != nil {
 				// The unique index on active runs is the authority; the
 				// activeHosts snapshot above can be stale by the time we insert.
 				if errors.Is(cErr, store.ErrHostHasActivePatchRun) {

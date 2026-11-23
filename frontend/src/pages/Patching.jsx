@@ -1800,7 +1800,9 @@ function PoliciesTab() {
 									<p className="text-xs text-secondary-500 dark:text-secondary-400">
 										Automatically run "Patch all" on every host assigned to this
 										policy (directly or via groups, respecting exclusions) on
-										the selected days — no manual trigger needed.
+										the selected days — no manual trigger needed. Windows hosts
+										get Windows Updates only; apps are not upgraded
+										automatically.
 									</p>
 									{form.auto_patch_enabled && (
 										<>
@@ -1873,8 +1875,8 @@ function PoliciesTab() {
 											<p className="text-xs text-amber-600 dark:text-amber-400">
 												Hosts reboot ~1 minute after a successful automated
 												patch run, only when a pending reboot is detected
-												(kernel/libc updates). Manual patch runs never trigger
-												this.
+												(kernel/libc updates on Linux, a pending restart on
+												Windows). Manual patch runs never trigger this.
 											</p>
 										</>
 									)}
