@@ -210,7 +210,7 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	if rdb != nil && enc != nil {
 		bootstrapStore = store.NewBootstrapStore(redisResolver, enc)
 	}
-	if rdb != nil {
+	if rdb != nil && remoteAccessAllowed() {
 		sshTicketStore = store.NewSshTicketStore(redisResolver)
 	}
 	installHandler := handler.NewInstallHandler(hostsStore, settingsStore, bootstrapStore, reportStore, log)
@@ -219,7 +219,7 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	alertConfigStore := store.NewAlertConfigStore(dbProvider)
 	var sshTerminalWSHandler *handler.SshTerminalWSHandler
 	var rdpHandler *handler.RDPHandler
-	if rdb != nil && cfg.GuacdAddress != "" {
+	if rdb != nil && cfg.GuacdAddress != "" && remoteAccessAllowed() {
 		rdpTicketStore := store.NewRDPTicketStore(redisResolver, enc)
 		rdpSessions := rdpproxy.NewSessions(log, registry)
 		rdpSessions.SetCapEmptyScope(poolCache != nil)
