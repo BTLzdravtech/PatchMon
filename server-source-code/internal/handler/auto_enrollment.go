@@ -433,9 +433,6 @@ func (h *AutoEnrollmentHandler) Enroll(w http.ResponseWriter, r *http.Request) {
 		MachineID    string          `json:"machine_id"`
 		HostID       string          `json:"host_id"`
 		Metadata     json.RawMessage `json:"metadata"`
-		// AutoUpdate sets the per-host agent auto-update flag. Omit to inherit
-		// the global agent auto-update setting.
-		AutoUpdate *bool `json:"auto_update"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		Error(w, http.StatusBadRequest, "Invalid request body")
@@ -491,7 +488,7 @@ func (h *AutoEnrollmentHandler) Enroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	host, apiKey, ok := h.createEnrolledHost(ctx, w, req.FriendlyName, req.MachineID, token.DefaultHostGroupID, token.ID, req.AutoUpdate)
+	host, apiKey, ok := h.createEnrolledHost(ctx, w, req.FriendlyName, req.MachineID, token.DefaultHostGroupID, token.ID)
 	if !ok {
 		return
 	}
@@ -655,7 +652,7 @@ func (h *AutoEnrollmentHandler) reenrolExistingHost(ctx context.Context, w http.
 	JSON(w, http.StatusOK, enrolResponse("Host credentials re-issued", existing, apiKey, nil, true))
 }
 
-func (h *AutoEnrollmentHandler) createEnrolledHost(ctx context.Context, w http.ResponseWriter, friendlyName, machineID string, defaultGroupID *string, tokenID string, autoUpdate *bool) (*models.Host, string, bool) {
+func (h *AutoEnrollmentHandler) createEnrolledHost(ctx context.Context, w http.ResponseWriter, friendlyName, machineID string, defaultGroupID *string, tokenID string) (*models.Host, string, bool) {
 	machineID = strings.TrimSpace(machineID)
 	usable := usableMachineID(machineID)
 	if usable {
@@ -719,9 +716,6 @@ func (h *AutoEnrollmentHandler) createEnrolledHost(ctx context.Context, w http.R
 	}
 
 	host := newPendingHost(friendlyName, machineID, apiID, string(apiKeyHash))
-	// Fork policy: an explicit request value wins, otherwise the host inherits
-	// the global agent auto-update setting (upstream defaults new hosts to true).
-	host.AutoUpdate = newHostAutoUpdate(ctx, h.settings, autoUpdate)
 	host.ComplianceEnabled = complianceEnabled
 	host.ComplianceOnDemandOnly = complianceOnDemandOnly
 	if tokenID != "" {

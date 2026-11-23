@@ -638,7 +638,7 @@ func runShutdownCommand(cmd *exec.Cmd, desc string) error {
 	case <-time.After(shutdownExitWait):
 		// Still running: reap it in the background so it does not linger as a
 		// zombie, and treat the reboot as scheduled.
-		go func() { <-done }()
+		go func() { <-done }() //nolint:errcheck // reaping only; the exit status no longer matters
 		return nil
 	}
 }

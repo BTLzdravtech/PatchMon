@@ -132,7 +132,7 @@ func TestCreateEnrolledHost_DuplicateGuard(t *testing.T) {
 			if friendlyName == "" {
 				friendlyName = "web-01"
 			}
-			host, apiKey, ok := h.createEnrolledHost(context.Background(), rec, friendlyName, tt.machineID, nil, "token-1", nil)
+			host, apiKey, ok := h.createEnrolledHost(context.Background(), rec, friendlyName, tt.machineID, nil, "token-1")
 
 			if got := len(fake.lookups); got != tt.wantLookups {
 				t.Fatalf("lookups = %d, want %d", got, tt.wantLookups)

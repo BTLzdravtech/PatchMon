@@ -2552,7 +2552,6 @@ curl "https://patchmon.example.com/api/v1/auto-enrollment/script?type=proxmox-lx
   "friendly_name": "webserver",
   "machine_id": "proxmox-lxc-100-abc123",
   "host_id": "550e8400-e29b-41d4-a716-446655440000",
-  "auto_update": true,
   "metadata": {
     "vmid": "100",
     "proxmox_node": "proxmox01",
@@ -2561,8 +2560,6 @@ curl "https://patchmon.example.com/api/v1/auto-enrollment/script?type=proxmox-lx
   }
 }
 ```
-
-`auto_update` is optional and controls the per-host agent auto-update flag. When omitted, the host inherits the global agent auto-update setting.
 
 **Response:** `201 Created`
 ```json
