@@ -17,7 +17,7 @@
 # merge; only the tag does.
 #
 # Release:   git tag v2.1.8-btl.1 && git push origin v2.1.8-btl.1
-#            ./docker/build-fork.sh --registry harbor.example.com/patchmon --push
+#            ./docker/build-fork.sh --image harbor.example.com/project/patchmon --push
 #
 # After merging upstream release vX.Y.Z, tag vX.Y.Z-btl.1 before the next
 # build; this script refuses to build below a release it can see.
@@ -25,9 +25,9 @@
 # Usage:
 #   ./docker/build-fork.sh --print-version         # show the version and exit
 #   ./docker/build-fork.sh                          # build patchmon-server:<version>
-#   ./docker/build-fork.sh --registry R [--push]    # also tag (and push) R/patchmon-server:<version>
+#   ./docker/build-fork.sh --image I [--push]       # also tag (and push) I:<version>
 #   ./docker/build-fork.sh --allow-dirty            # build with uncommitted changes
-#   PATCHMON_REGISTRY=R ./docker/build-fork.sh --push
+#   PATCHMON_IMAGE=I ./docker/build-fork.sh --push
 # =============================================================================
 
 set -euo pipefail
@@ -37,7 +37,7 @@ FORK_ID="btl"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-REGISTRY="${PATCHMON_REGISTRY:-}"
+IMAGE="${PATCHMON_IMAGE:-}"
 PUSH="false"
 ALLOW_DIRTY="false"
 PRINT_ONLY="false"
@@ -46,7 +46,7 @@ die() { echo "error: $*" >&2; exit 1; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --registry) REGISTRY="${2:-}"; shift 2 ;;
+    --image) IMAGE="${2:-}"; shift 2 ;;
     --push) PUSH="true"; shift ;;
     --allow-dirty) ALLOW_DIRTY="true"; shift ;;
     --print-version) PRINT_ONLY="true"; shift ;;
@@ -55,8 +55,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ "$PUSH" = "true" ] && [ -z "$REGISTRY" ]; then
-  die "--push needs --registry (or PATCHMON_REGISTRY), e.g. harbor.example.com/patchmon"
+if [ "$PUSH" = "true" ] && [ -z "$IMAGE" ]; then
+  die "--push needs --image (or PATCHMON_IMAGE), e.g. harbor.example.com/project/patchmon"
 fi
 
 # The highest fork tag in HEAD's history, not the nearest: after an upstream
@@ -105,8 +105,8 @@ fi
 echo "==> Fork version: $VERSION (tag $FORK_TAG + $DISTANCE commits)"
 "$ROOT/docker/build.sh" --version "$VERSION" --tag "$VERSION"
 
-if [ -n "$REGISTRY" ]; then
-  TARGET="${REGISTRY%/}/patchmon-server:${VERSION}"
+if [ -n "$IMAGE" ]; then
+  TARGET="${IMAGE%/}:${VERSION}"
   docker tag "patchmon-server:${VERSION}" "$TARGET"
   echo "==> Tagged $TARGET"
   if [ "$PUSH" = "true" ]; then
