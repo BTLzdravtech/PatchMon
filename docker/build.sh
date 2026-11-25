@@ -60,7 +60,8 @@ if [ -z "$VERSION" ]; then
       ./docker/build.sh --version 2.0.3"
 fi
 
-if ! printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+# Fork: also accept the fork's pre-release versions (docker/build-fork.sh).
+if ! printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-btl\.[0-9]+(\.[0-9]+)?)?$'; then
   die "version '$VERSION' is not MAJOR.MINOR.PATCH. Local builds must pass a bare
   release version; edge pre-releases like 2.0.3-rc.61 are minted by CI only."
 fi

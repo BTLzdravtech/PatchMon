@@ -333,6 +333,7 @@ SET auto_patch_enabled = sqlc.arg('auto_patch_enabled'),
     auto_patch_days = sqlc.narg('auto_patch_days'),
     auto_patch_time = sqlc.narg('auto_patch_time'),
     auto_reboot = sqlc.arg('auto_reboot'),
+    apt_autoremove = sqlc.arg('apt_autoremove'),
     updated_at = NOW()
 WHERE id = sqlc.arg('id');
 

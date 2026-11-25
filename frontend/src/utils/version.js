@@ -1,3 +1,5 @@
+import { compareForkBuilds } from "./versionFork.js";
+
 // Version comparison mirroring util.CompareVersions in the Go server
 // (server-source-code/internal/util/version.go). Keep the two in step: the
 // login screen and the server's update alert must agree on whether an update
@@ -73,6 +75,10 @@ export const compareVersions = (v1, v2) => {
 
 	const core = compareNumericParts(a.core, b.core);
 	if (core !== 0) return core;
+
+	// Fork: -btl builds rank above their core, see versionFork.js.
+	const fork = compareForkBuilds(a.pre, b.pre, comparePreRelease);
+	if (fork !== null) return fork;
 
 	if (!a.pre && !b.pre) return 0;
 	if (!a.pre) return 1;

@@ -211,6 +211,7 @@ func (h *AutoPatchDispatchHandler) ProcessTask(ctx context.Context, _ *asynq.Tas
 				"patch_delay_type": "immediate",
 				"auto_patch":       true,
 				"auto_reboot":      p.AutoReboot,
+				"apt_autoremove":   p.AptAutoremove,
 				"scheduled_slot":   slot.UTC().Format(time.RFC3339),
 			})
 			// triggeredByUserID nil = system-initiated; visible in Runs &
@@ -233,6 +234,7 @@ func (h *AutoPatchDispatchHandler) ProcessTask(ctx context.Context, _ *asynq.Tas
 				PatchRunID:       runID,
 				PatchType:        "patch_all",
 				RebootIfRequired: p.AutoReboot,
+				AptAutoremove:    p.AptAutoremove,
 				NotAfter:         &notAfter,
 			})
 			if tErr != nil {
@@ -246,7 +248,7 @@ func (h *AutoPatchDispatchHandler) ProcessTask(ctx context.Context, _ *asynq.Tas
 			activeHosts[host.ID] = struct{}{}
 			queued++
 		}
-		h.log.Info("auto_patch: policy fired", "policy", p.Name, "slot", slot.UTC().Format(time.RFC3339), "queued", queued, "skipped", skipped, "auto_reboot", p.AutoReboot)
+		h.log.Info("auto_patch: policy fired", "policy", p.Name, "slot", slot.UTC().Format(time.RFC3339), "queued", queued, "skipped", skipped, "auto_reboot", p.AutoReboot, "apt_autoremove", p.AptAutoremove)
 	}
 	return nil
 }

@@ -493,6 +493,7 @@ type PatchPolicy struct {
 	AutoPatchDays      *string          `json:"auto_patch_days"`
 	AutoPatchTime      *string          `json:"auto_patch_time"`
 	AutoPatchLastRunAt pgtype.Timestamp `json:"auto_patch_last_run_at"`
+	AptAutoremove      bool             `json:"apt_autoremove"`
 	CreatedAt          pgtype.Timestamp `json:"created_at"`
 	UpdatedAt          pgtype.Timestamp `json:"updated_at"`
 }

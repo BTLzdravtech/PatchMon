@@ -20,3 +20,7 @@ Never add fork migrations to `server-source-code/internal/migrate/migrations/`. 
 - Do not hand-merge `server-source-code/internal/db/`; it is generated. Resolve `internal/sqlc/` first, then run `make sqlc-generate` (sqlc v1.30.0).
 - After `package-lock.json` changes, run `npm ci` before Biome or vitest.
 - Checks: `make check` in `server-source-code/` and `agent-source-code/`, `npx @biomejs/biome check .`, and `npm run test:run` in `frontend/`.
+
+## Releasing the fork
+
+We build images on this machine and push them to Harbor; CI does not build them. Build with `docker/build-fork.sh`, not `docker/build.sh`. Agents only update to a higher version, so fork releases are tagged as the upstream release plus `btl`, e.g. `v2.1.8-btl.1`, and the fork's version comparison (`internal/util/version_fork.go`, `frontend/src/utils/versionFork.js`) ranks `-btl` above the release itself. Commits after the tag build as `2.1.8-btl.1.N`. After merging upstream release vX.Y.Z, tag `vX.Y.Z-btl.1` before the next build. The version comes only from tags, never from files.

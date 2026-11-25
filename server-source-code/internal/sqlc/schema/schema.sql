@@ -752,6 +752,7 @@ CREATE TABLE IF NOT EXISTS patch_policies (
     auto_patch_days TEXT,
     auto_patch_time TEXT,
     auto_patch_last_run_at TIMESTAMP(3),
+    apt_autoremove BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP(3) NOT NULL
 );

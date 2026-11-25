@@ -1323,6 +1323,7 @@ func (h *PatchingHandler) ListPolicies(w http.ResponseWriter, r *http.Request) {
 			"auto_patch_days":    p.AutoPatchDays,
 			"auto_patch_time":    p.AutoPatchTime,
 			"auto_reboot":        p.AutoReboot,
+			"apt_autoremove":     p.AptAutoremove,
 			"created_at":         pgTimeToISO(p.CreatedAt),
 			"updated_at":         pgTimeToISO(p.UpdatedAt),
 			"_count":             map[string]int{"assignments": len(assignments), "exclusions": len(exclusions)},
@@ -1381,6 +1382,7 @@ func (h *PatchingHandler) GetPolicy(w http.ResponseWriter, r *http.Request) {
 		"auto_patch_days":    policy.AutoPatchDays,
 		"auto_patch_time":    policy.AutoPatchTime,
 		"auto_reboot":        policy.AutoReboot,
+		"apt_autoremove":     policy.AptAutoremove,
 		"created_at":         pgTimeToISO(policy.CreatedAt),
 		"updated_at":         pgTimeToISO(policy.UpdatedAt),
 		"assignments":        assignmentsResp,
@@ -1454,6 +1456,7 @@ func (h *PatchingHandler) CreatePolicy(w http.ResponseWriter, r *http.Request) {
 		AutoPatchDays    *string `json:"auto_patch_days"`
 		AutoPatchTime    *string `json:"auto_patch_time"`
 		AutoReboot       bool    `json:"auto_reboot"`
+		AptAutoremove    bool    `json:"apt_autoremove"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		JSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
@@ -1481,7 +1484,7 @@ func (h *PatchingHandler) CreatePolicy(w http.ResponseWriter, r *http.Request) {
 		JSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to create policy"})
 		return
 	}
-	if err := h.patchPolicies.SetAutoPatchConfig(r.Context(), id, body.AutoPatchEnabled, body.AutoPatchDays, body.AutoPatchTime, body.AutoReboot); err != nil {
+	if err := h.patchPolicies.SetAutoPatchConfig(r.Context(), id, body.AutoPatchEnabled, body.AutoPatchDays, body.AutoPatchTime, body.AutoReboot, body.AptAutoremove); err != nil {
 		h.log.Error("patching: set auto-patch config error", "policy_id", id, "error", err)
 		JSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to save automated patching settings"})
 		return
@@ -1499,6 +1502,7 @@ func (h *PatchingHandler) CreatePolicy(w http.ResponseWriter, r *http.Request) {
 		"auto_patch_days":    body.AutoPatchDays,
 		"auto_patch_time":    body.AutoPatchTime,
 		"auto_reboot":        body.AutoReboot,
+		"apt_autoremove":     body.AptAutoremove,
 		"created_at":         time.Now().UTC().Format(time.RFC3339),
 		"updated_at":         time.Now().UTC().Format(time.RFC3339),
 	}
@@ -1534,6 +1538,7 @@ func (h *PatchingHandler) UpdatePolicy(w http.ResponseWriter, r *http.Request) {
 		AutoPatchDays    *string `json:"auto_patch_days"`
 		AutoPatchTime    *string `json:"auto_patch_time"`
 		AutoReboot       *bool   `json:"auto_reboot"`
+		AptAutoremove    *bool   `json:"apt_autoremove"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		JSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
@@ -1552,6 +1557,7 @@ func (h *PatchingHandler) UpdatePolicy(w http.ResponseWriter, r *http.Request) {
 	autoDays := existing.AutoPatchDays
 	autoTime := existing.AutoPatchTime
 	autoReboot := existing.AutoReboot
+	aptAutoremove := existing.AptAutoremove
 	if body.AutoPatchEnabled != nil {
 		autoEnabled = *body.AutoPatchEnabled
 	}
@@ -1563,6 +1569,9 @@ func (h *PatchingHandler) UpdatePolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.AutoReboot != nil {
 		autoReboot = *body.AutoReboot
+	}
+	if body.AptAutoremove != nil {
+		aptAutoremove = *body.AptAutoremove
 	}
 	if msg := validateAutoPatchInput(autoEnabled, autoDays, autoTime); msg != "" {
 		JSON(w, http.StatusBadRequest, map[string]string{"error": msg})
@@ -1578,7 +1587,7 @@ func (h *PatchingHandler) UpdatePolicy(w http.ResponseWriter, r *http.Request) {
 		JSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to update policy"})
 		return
 	}
-	if err := h.patchPolicies.SetAutoPatchConfig(r.Context(), id, autoEnabled, autoDays, autoTime, autoReboot); err != nil {
+	if err := h.patchPolicies.SetAutoPatchConfig(r.Context(), id, autoEnabled, autoDays, autoTime, autoReboot, aptAutoremove); err != nil {
 		h.log.Error("patching: set auto-patch config error", "policy_id", id, "error", err)
 		JSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to save automated patching settings"})
 		return
@@ -1596,6 +1605,7 @@ func (h *PatchingHandler) UpdatePolicy(w http.ResponseWriter, r *http.Request) {
 		"auto_patch_days":    autoDays,
 		"auto_patch_time":    autoTime,
 		"auto_reboot":        autoReboot,
+		"apt_autoremove":     aptAutoremove,
 	}
 	if policy != nil {
 		resp["created_at"] = pgTimeToISO(policy.CreatedAt)
