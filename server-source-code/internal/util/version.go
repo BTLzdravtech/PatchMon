@@ -22,6 +22,11 @@ func CompareVersions(v1, v2 string) int {
 		return c
 	}
 
+	// Fork: -btl builds rank above their core, see version_fork.go.
+	if c, ok := compareForkBuilds(pre1, pre2); ok {
+		return c
+	}
+
 	// Cores are equal, so the pre-release decides. Absent pre-release wins:
 	// 2.0.3 outranks 2.0.3-rc.4.
 	switch {
