@@ -270,7 +270,7 @@ func (q *Queries) ExistsPatchPolicyExclusion(ctx context.Context, arg ExistsPatc
 }
 
 const getDirectPatchPolicyAssignment = `-- name: GetDirectPatchPolicyAssignment :one
-SELECT pp.id, pp.name, pp.description, pp.patch_delay_type, pp.delay_minutes, pp.fixed_time_utc, pp.timezone, pp.auto_reboot, pp.auto_patch_enabled, pp.auto_patch_days, pp.auto_patch_time, pp.auto_patch_last_run_at, pp.created_at, pp.updated_at FROM patch_policy_assignments ppa
+SELECT pp.id, pp.name, pp.description, pp.patch_delay_type, pp.delay_minutes, pp.fixed_time_utc, pp.timezone, pp.auto_reboot, pp.auto_patch_enabled, pp.auto_patch_days, pp.auto_patch_time, pp.auto_patch_last_run_at, pp.apt_autoremove, pp.created_at, pp.updated_at FROM patch_policy_assignments ppa
 JOIN patch_policies pp ON ppa.patch_policy_id = pp.id
 WHERE ppa.target_type = 'host' AND ppa.target_id = $1
 ORDER BY ppa.created_at ASC
@@ -294,6 +294,7 @@ func (q *Queries) GetDirectPatchPolicyAssignment(ctx context.Context, targetID s
 		&i.AutoPatchDays,
 		&i.AutoPatchTime,
 		&i.AutoPatchLastRunAt,
+		&i.AptAutoremove,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -343,7 +344,7 @@ func (q *Queries) GetPatchPolicyAssignmentByID(ctx context.Context, id string) (
 }
 
 const getPatchPolicyByGroupAssignment = `-- name: GetPatchPolicyByGroupAssignment :one
-SELECT pp.id, pp.name, pp.description, pp.patch_delay_type, pp.delay_minutes, pp.fixed_time_utc, pp.timezone, pp.auto_reboot, pp.auto_patch_enabled, pp.auto_patch_days, pp.auto_patch_time, pp.auto_patch_last_run_at, pp.created_at, pp.updated_at FROM patch_policy_assignments ppa
+SELECT pp.id, pp.name, pp.description, pp.patch_delay_type, pp.delay_minutes, pp.fixed_time_utc, pp.timezone, pp.auto_reboot, pp.auto_patch_enabled, pp.auto_patch_days, pp.auto_patch_time, pp.auto_patch_last_run_at, pp.apt_autoremove, pp.created_at, pp.updated_at FROM patch_policy_assignments ppa
 JOIN patch_policies pp ON ppa.patch_policy_id = pp.id
 WHERE ppa.target_type = 'host_group' AND ppa.target_id = $1
 ORDER BY ppa.created_at ASC
@@ -366,6 +367,7 @@ func (q *Queries) GetPatchPolicyByGroupAssignment(ctx context.Context, targetID 
 		&i.AutoPatchDays,
 		&i.AutoPatchTime,
 		&i.AutoPatchLastRunAt,
+		&i.AptAutoremove,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -373,7 +375,7 @@ func (q *Queries) GetPatchPolicyByGroupAssignment(ctx context.Context, targetID 
 }
 
 const getPatchPolicyByID = `-- name: GetPatchPolicyByID :one
-SELECT id, name, description, patch_delay_type, delay_minutes, fixed_time_utc, timezone, auto_reboot, auto_patch_enabled, auto_patch_days, auto_patch_time, auto_patch_last_run_at, created_at, updated_at FROM patch_policies WHERE id = $1
+SELECT id, name, description, patch_delay_type, delay_minutes, fixed_time_utc, timezone, auto_reboot, auto_patch_enabled, auto_patch_days, auto_patch_time, auto_patch_last_run_at, apt_autoremove, created_at, updated_at FROM patch_policies WHERE id = $1
 `
 
 func (q *Queries) GetPatchPolicyByID(ctx context.Context, id string) (PatchPolicy, error) {
@@ -392,6 +394,7 @@ func (q *Queries) GetPatchPolicyByID(ctx context.Context, id string) (PatchPolic
 		&i.AutoPatchDays,
 		&i.AutoPatchTime,
 		&i.AutoPatchLastRunAt,
+		&i.AptAutoremove,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -620,7 +623,7 @@ func (q *Queries) ListActivePatchRuns(ctx context.Context) ([]ListActivePatchRun
 }
 
 const listAutoPatchPolicies = `-- name: ListAutoPatchPolicies :many
-SELECT id, name, description, patch_delay_type, delay_minutes, fixed_time_utc, timezone, auto_reboot, auto_patch_enabled, auto_patch_days, auto_patch_time, auto_patch_last_run_at, created_at, updated_at FROM patch_policies WHERE auto_patch_enabled = true ORDER BY name ASC
+SELECT id, name, description, patch_delay_type, delay_minutes, fixed_time_utc, timezone, auto_reboot, auto_patch_enabled, auto_patch_days, auto_patch_time, auto_patch_last_run_at, apt_autoremove, created_at, updated_at FROM patch_policies WHERE auto_patch_enabled = true ORDER BY name ASC
 `
 
 func (q *Queries) ListAutoPatchPolicies(ctx context.Context) ([]PatchPolicy, error) {
@@ -645,6 +648,7 @@ func (q *Queries) ListAutoPatchPolicies(ctx context.Context) ([]PatchPolicy, err
 			&i.AutoPatchDays,
 			&i.AutoPatchTime,
 			&i.AutoPatchLastRunAt,
+			&i.AptAutoremove,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -688,7 +692,7 @@ func (q *Queries) ListHostIDsWithActivePatchRuns(ctx context.Context) ([]string,
 }
 
 const listPatchPolicies = `-- name: ListPatchPolicies :many
-SELECT id, name, description, patch_delay_type, delay_minutes, fixed_time_utc, timezone, auto_reboot, auto_patch_enabled, auto_patch_days, auto_patch_time, auto_patch_last_run_at, created_at, updated_at FROM patch_policies ORDER BY name ASC
+SELECT id, name, description, patch_delay_type, delay_minutes, fixed_time_utc, timezone, auto_reboot, auto_patch_enabled, auto_patch_days, auto_patch_time, auto_patch_last_run_at, apt_autoremove, created_at, updated_at FROM patch_policies ORDER BY name ASC
 `
 
 // patch_policies
@@ -714,6 +718,7 @@ func (q *Queries) ListPatchPolicies(ctx context.Context) ([]PatchPolicy, error) 
 			&i.AutoPatchDays,
 			&i.AutoPatchTime,
 			&i.AutoPatchLastRunAt,
+			&i.AptAutoremove,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -2224,8 +2229,9 @@ SET auto_patch_enabled = $1,
     auto_patch_days = $2,
     auto_patch_time = $3,
     auto_reboot = $4,
+    apt_autoremove = $5,
     updated_at = NOW()
-WHERE id = $5
+WHERE id = $6
 `
 
 type UpdatePatchPolicyAutoPatchParams struct {
@@ -2233,6 +2239,7 @@ type UpdatePatchPolicyAutoPatchParams struct {
 	AutoPatchDays    *string `json:"auto_patch_days"`
 	AutoPatchTime    *string `json:"auto_patch_time"`
 	AutoReboot       bool    `json:"auto_reboot"`
+	AptAutoremove    bool    `json:"apt_autoremove"`
 	ID               string  `json:"id"`
 }
 
@@ -2242,6 +2249,7 @@ func (q *Queries) UpdatePatchPolicyAutoPatch(ctx context.Context, arg UpdatePatc
 		arg.AutoPatchDays,
 		arg.AutoPatchTime,
 		arg.AutoReboot,
+		arg.AptAutoremove,
 		arg.ID,
 	)
 	return err

@@ -149,6 +149,12 @@ type RunPatchPayload struct {
 	// the host still flags a pending reboot. Set by policy-driven automatic
 	// runs (patch_policies.auto_reboot); manual runs leave it false.
 	RebootIfRequired bool `json:"reboot_if_required,omitempty"`
+	// AptAutoremove tells an apt agent to remove unused packages after a
+	// successful patch_all: those this run left unused and old kernels, with
+	// the agent's safety checks (see patch_autoremove.go). Set by policy-driven
+	// automatic runs (patch_policies.apt_autoremove); manual runs leave it
+	// false. Other package managers ignore it and Windows never receives it.
+	AptAutoremove bool `json:"apt_autoremove,omitempty"`
 	// NotAfter bounds how long an offline host may keep this run queued. When
 	// set and the agent is still disconnected past this instant, the run is
 	// cancelled instead of re-queued. Policy-driven automatic runs set it to
@@ -1039,6 +1045,9 @@ func buildRunPatchMessage(p RunPatchPayload, run *db.GetPatchRunByIDRow, windows
 		payload["reboot_if_required"] = true
 	}
 	if !windows {
+		if p.AptAutoremove && p.PatchType == "patch_all" {
+			payload["apt_autoremove"] = true
+		}
 		if p.PackageName != nil {
 			payload["package_name"] = *p.PackageName
 		}

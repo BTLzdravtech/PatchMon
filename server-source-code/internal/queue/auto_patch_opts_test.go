@@ -65,3 +65,31 @@ func TestBuildRunPatchMessageWindowsCarriesRebootFlag(t *testing.T) {
 		t.Fatalf("reboot_if_required present without the policy flag: %+v", msg)
 	}
 }
+
+// The policy apt autoremove flag reaches Linux/BSD agents on patch_all only:
+// selected-package runs and Windows hosts never carry it.
+func TestBuildRunPatchMessageAptAutoremove(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload RunPatchPayload
+		windows bool
+		want    bool
+	}{
+		{"patch_all with the policy flag", RunPatchPayload{PatchType: "patch_all", AptAutoremove: true}, false, true},
+		{"patch_all without the policy flag", RunPatchPayload{PatchType: "patch_all"}, false, false},
+		{"selected packages ignore the flag", RunPatchPayload{PatchType: "patch_package", PackageNames: []string{"curl"}, AptAutoremove: true}, false, false},
+		{"windows ignores the flag", RunPatchPayload{PatchType: "patch_all", AptAutoremove: true}, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := buildRunPatchMessage(tt.payload, &db.GetPatchRunByIDRow{}, tt.windows, nil)
+			got, ok := msg["apt_autoremove"]
+			if tt.want && got != true {
+				t.Fatalf("aptAutoremove = %v, want true; msg = %+v", got, msg)
+			}
+			if !tt.want && ok {
+				t.Fatalf("aptAutoremove present: %+v", msg)
+			}
+		})
+	}
+}

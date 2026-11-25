@@ -516,7 +516,7 @@ func runServiceLoop(stopCh <-chan struct{}) error {
 					if runtime.GOOS == "windows" {
 						err = runPatchWindowsWithReboot(msg.patchRunID, msg.windowsPatch, msg.patchParseError, msg.rebootIfRequired)
 					} else {
-						err = runPatch(msg.patchRunID, msg.patchType, msg.packageNames, msg.dryRun, msg.rebootIfRequired)
+						err = runPatch(msg.patchRunID, msg.patchType, msg.packageNames, msg.dryRun, msg.rebootIfRequired, msg.aptAutoremove)
 					}
 					switch {
 					case errors.Is(err, errPatchRunStopped):
@@ -1439,6 +1439,7 @@ type wsMsg struct {
 	packageNames     []string
 	dryRun           bool
 	rebootIfRequired bool // reboot after success iff host still needs it
+	aptAutoremove    bool // fork: apt autoremove after a successful patch_all, see patch_autoremove.go
 	windowsPatch     packages.WindowsPatchRequest
 	patchParseError  string
 	sshProxyData     string // SSH input data
@@ -1954,6 +1955,7 @@ func connectOnce(out chan<- wsMsg, backoff *time.Duration) (connected bool, err 
 			PackageNames     []string                      `json:"package_names"`
 			DryRun           bool                          `json:"dry_run"`
 			RebootIfRequired bool                          `json:"reboot_if_required"`
+			AptAutoremove    bool                          `json:"apt_autoremove"`
 			Targets          []packages.WindowsPatchTarget `json:"targets"`
 			IncludeUpdates   *bool                         `json:"include_updates"`
 			IncludeApps      *bool                         `json:"include_apps"`
@@ -2058,6 +2060,7 @@ func connectOnce(out chan<- wsMsg, backoff *time.Duration) (connected bool, err 
 				"package_names":      packageNames,
 				"dry_run":            payload.DryRun,
 				"reboot_if_required": payload.RebootIfRequired,
+				"apt_autoremove":     payload.AptAutoremove,
 			})).Info("run_patch received")
 			dispatchWSMessage(out, wsMsg{
 				kind:             "run_patch",
@@ -2066,6 +2069,7 @@ func connectOnce(out chan<- wsMsg, backoff *time.Duration) (connected bool, err 
 				packageNames:     packageNames,
 				dryRun:           payload.DryRun,
 				rebootIfRequired: payload.RebootIfRequired,
+				aptAutoremove:    payload.AptAutoremove,
 			})
 		case "compliance_scan":
 			// Validate profile ID to prevent command injection
@@ -2690,7 +2694,7 @@ func patchTypeRefusal(pkgManager, patchType string, dryRun bool) string {
 // runPatch runs package manager update and upgrade (patch_all) or install (patch_package).
 // Supports apt-get (Debian/Ubuntu), dnf, yum (RHEL-based), pkg (FreeBSD), pacman (Arch),
 // apk (Alpine) and zypper (openSUSE, SLES). When dryRun is true, simulates and sends dry_run_completed instead of completed.
-func runPatch(patchRunID, patchType string, packageNames []string, dryRun, rebootIfRequired bool) error {
+func runPatch(patchRunID, patchType string, packageNames []string, dryRun, rebootIfRequired, aptAutoremove bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
@@ -2878,6 +2882,9 @@ func runPatch(patchRunID, patchType string, packageNames []string, dryRun, reboo
 					} else if err, abort := runStep(false, "univention-upgrade", "univention-upgrade failed: %w", "univention-upgrade", ucsUpgradeArgs(ucsRelease)...); abort {
 						stepErr = err
 					}
+					if aptAutoremove {
+						aptAutoremoveSkip(sink, "on Univention Corporate Server, univention-upgrade manages package removal")
+					}
 					break
 				}
 				// --with-new-pkgs makes apt-get match what the collector
@@ -2888,6 +2895,12 @@ func runPatch(patchRunID, patchType string, packageNames []string, dryRun, reboo
 				// this flag PatchMon reports the meta-packages as outdated,
 				// applies the patch, installs nothing, and reports them as
 				// outdated again forever.
+				// Fork: policy apt autoremove, see patch_autoremove.go. The
+				// snapshot of what is already unused must precede the upgrade.
+				var aptCleanup *aptAutoremovePlan
+				if aptAutoremove {
+					aptCleanup = beginAptAutoremove(ctx, sink, env, dryRun)
+				}
 				if dryRun {
 					if err, abort := runStep(false, "apt-get -s upgrade", "apt-get -s upgrade failed: %w", "apt-get", aptUpgradeArgs(true, aptDisableRetries)...); abort {
 						stepErr = err
@@ -2896,6 +2909,9 @@ func runPatch(patchRunID, patchType string, packageNames []string, dryRun, reboo
 					if err, abort := runStep(false, "apt-get upgrade", "apt-get upgrade failed: %w", "apt-get", aptUpgradeArgs(false, aptDisableRetries)...); abort {
 						stepErr = err
 					}
+				}
+				if stepErr == nil && aptCleanup != nil {
+					stepErr = aptCleanup.finish(ctx, sink, env, aptDisableRetries, runStep)
 				}
 			case "pkg":
 				if dryRun {

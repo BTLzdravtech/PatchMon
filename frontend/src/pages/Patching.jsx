@@ -1360,6 +1360,7 @@ function PoliciesTab() {
 		auto_patch_days: [],
 		auto_patch_time: "03:00",
 		auto_reboot: false,
+		apt_autoremove: false,
 	});
 	const [expandedPolicyId, setExpandedPolicyId] = useState(null);
 
@@ -1424,6 +1425,7 @@ function PoliciesTab() {
 			auto_patch_days: [],
 			auto_patch_time: "03:00",
 			auto_reboot: false,
+			apt_autoremove: false,
 		});
 
 	const openCreate = () => {
@@ -1449,6 +1451,7 @@ function PoliciesTab() {
 				: [],
 			auto_patch_time: policy.auto_patch_time || "03:00",
 			auto_reboot: policy.auto_reboot || false,
+			apt_autoremove: policy.apt_autoremove || false,
 		});
 		setShowModal(true);
 	};
@@ -1482,6 +1485,7 @@ function PoliciesTab() {
 				: null,
 			auto_patch_time: form.auto_patch_enabled ? form.auto_patch_time : null,
 			auto_reboot: form.auto_patch_enabled ? form.auto_reboot : false,
+			apt_autoremove: form.auto_patch_enabled ? form.apt_autoremove : false,
 		};
 		if (editingPolicy) {
 			updateMutation.mutate({ id: editingPolicy.id, data: payload });
@@ -1510,7 +1514,7 @@ function PoliciesTab() {
 			.filter(Boolean)
 			.map((d) => dayNames[Number(d.trim())] ?? d)
 			.join(", ");
-		return `Auto: ${days} at ${policy.auto_patch_time} (${orgTimezone})${policy.auto_reboot ? " + reboot" : ""}`;
+		return `Auto: ${days} at ${policy.auto_patch_time} (${orgTimezone})${policy.apt_autoremove ? " + autoremove" : ""}${policy.auto_reboot ? " + reboot" : ""}`;
 	};
 
 	return (
@@ -1877,6 +1881,34 @@ function PoliciesTab() {
 												patch run, only when a pending reboot is detected
 												(kernel/libc updates on Linux, a pending restart on
 												Windows). Manual patch runs never trigger this.
+											</p>
+											<label className="flex items-center gap-2 cursor-pointer">
+												<input
+													type="checkbox"
+													checked={form.apt_autoremove}
+													onChange={(e) =>
+														setForm((f) => ({
+															...f,
+															apt_autoremove: e.target.checked,
+														}))
+													}
+													className="rounded border-secondary-300 dark:border-secondary-600"
+												/>
+												<span className="text-sm text-secondary-700 dark:text-secondary-300">
+													Remove old kernels and unused packages after patching
+													(apt)
+												</span>
+											</label>
+											<p className="text-xs text-secondary-500 dark:text-secondary-400">
+												On Debian/Ubuntu hosts, after a successful automated
+												patch run: removes old kernels apt marks as removable
+												and the packages that run left unused. Packages that
+												were already unused are left alone. The removal is
+												skipped, and the reason shown in the run output, if it
+												would touch the running kernel, leave no fallback
+												kernel, or remove essential, networking or more than 25
+												other packages. Configuration files are kept. Other
+												package managers and manual patch runs are unaffected.
 											</p>
 										</>
 									)}
